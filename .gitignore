@@ -1,0 +1,6 @@
+node_modules/
+.DS_Store
+lib/tsconfig.tsbuildinfo
+lib/types/**/*.js
+lib/types/**/*.js.map
+lib/types/**/*.d.ts.map

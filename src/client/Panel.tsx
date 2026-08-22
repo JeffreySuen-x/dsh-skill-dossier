@@ -5,7 +5,7 @@
  */
 import { useEffect, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from 'react'
-import type { SkillManagerInjected } from './index.ts'
+import type { SkillManagerInjected, ThemeScheme } from './index.ts'
 import css from './Panel.module.css'
 
 const DIRECTIONS = ['开发工程', '前端视觉', '研究分析', '内容创作', '知识库', '记忆复盘', '元技能', '工具集成', '其他']
@@ -95,8 +95,9 @@ function normalizeList(res: unknown): ListResult {
   }
 }
 
-export function Panel({ sessionId, prependDraft }: SkillManagerInjected) {
+export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInjected) {
   const [open, setOpen] = useState(false)
+  const [scheme, setScheme] = useState<ThemeScheme>(() => themeScheme.get())
   const [data, setData] = useState<ListResult | null>(null)
   const [query, setQuery] = useState('')
   const [tab, setTab] = useState<'skills' | 'archive' | 'match'>('skills')
@@ -137,6 +138,8 @@ export function Panel({ sessionId, prependDraft }: SkillManagerInjected) {
       })
     return () => { cancelled = true }
   }, [open, sessionId])
+
+  useEffect(() => themeScheme.subscribe(setScheme), [themeScheme])
 
   const profiles = data?.index.skills ?? {}
   const trash = data?.index.trash ?? {}
@@ -563,7 +566,7 @@ export function Panel({ sessionId, prependDraft }: SkillManagerInjected) {
   const headerTitle = tab === 'archive' ? '技能档案' : tab === 'match' ? '技能匹配' : view === 'create' ? '新建技能' : view === 'detail' ? '技能详情' : 'Skills'
 
   return (
-    <div className={css.wrap}>
+    <div className={css.wrap} data-theme={scheme}>
       <button
         type="button"
         className={`${css.toggle}${open ? ` ${css.toggleActive}` : ''}`}

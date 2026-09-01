@@ -1,6 +1,6 @@
 /**
  * Skill 全生命周期管理（browser half）：会话头部右上角的 utilities 区
- * （session-log 同排）挂载 Skills 按钮与自包含弹层。数据经
+ * （session-log 同排）挂载「管理」按钮与自包含弹层。数据经
  * `POST /api/skill-manager` 与 host half 通信，不依赖任何客户端专用服务。
  *
  * 「调用」不再走 host followup，而是把 `/name` 手势作为前缀插入当前会话
@@ -66,7 +66,7 @@ export function apply(ctx: ClientContext): void {
     name: 'conversation.session.header.utilities',
     id: 'skill-manager',
     order: 1,
-    label: 'Skills',
+    label: '管理',
     inject: (sessionId: SessionId): SkillManagerInjected => ({
       sessionId,
       prependDraft: (text) => {

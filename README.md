@@ -1,12 +1,16 @@
 # dsh-skill-manager
 
-DeepSeek Harness（DSH）的技能全生命周期管理插件：目录浏览、一键 `/name` 调用、识别建档（方向/使用范围/能力边界/应用场景）、文件夹技能的停用·重装·删除、会话级临时技能。host 半 + 浏览器半（会话头部 `Skills` 按钮）。
+DeepSeek Harness（DSH）的技能全生命周期管理插件：目录浏览、一键 `/name` 调用、识别建档（10 类方向/使用范围/能力边界/应用场景）、两段式路由、调用统计、保鲜复审、有效性评测触发、文件夹技能停用·重装·删除、会话级临时技能。host 半 + 浏览器半（会话头部 `Skills` 按钮）。
 
 ## 功能
 
 - **技能目录**：浏览/搜索/详情，一键 `/name` 调用
-- **建档（skill_archive）**：给技能写档案，持久化到 `<工作区>/.dsh/skill-manager/index.json`
-- **匹配（skill_match）**：按当前任务描述从已建档技能里选最相关候选
+- **建档（skill_archive）**：给技能写档案，方向为 10 类固定枚举（工程代码/前端视觉/调研报告/内容写作/知识库/记忆会话/多代理编排/本地模型/元技能/命理玄学），持久化到 `<工作区>/.dsh/skill-manager/index.json`；DSH 原生技能（`source === 'bundled'`）拒绝建档
+- **匹配（skill_match）**：按任务描述从已建档技能里选最相关候选，支持 `direction` 过滤
+- **路由（skill_route）**：两段式——先用关键词命中判方向，再在方向内检索（先分类再检索）
+- **使用统计（skill_usage）**：自动记录每个技能被调用的次数与频率
+- **保鲜复审（skill_review）**：按「易变方向 + 长期未用 + 从未/久未复审」给待复审技能排序
+- **有效性评测（skill_eval / record_eval）**：触发 darwin-skill 在对话框外做「带 vs 不带」对比评测，并把结论写回档案
 - **生命周期**：文件夹技能停用（移入 trash，可逆）→ 重装 / 彻底删除
 - **临时技能**：会话级注册/卸载运行时技能
 
@@ -27,12 +31,21 @@ dsh plugin --profile web add github:JeffreySuen-x/dsh-skill-manager
 ```sh
 pnpm install        # 拉取构建工具 + 类型依赖（@deepseek-ai/* 为公开包）
 pnpm run build      # tsc 产出 lib/types + tsdown 打包 lib/index.js、lib/client.js
-pnpm run test       # 26 条单测
+pnpm run test       # 46 条单测
 ```
 
 改完 `src/` 后运行 `pnpm run build` 并提交 `lib/`，即可保证仓库始终自洽（不会出现「改了 src 但 lib 没更新」的隐患）。
 
 > 注意：类型依赖（`@deepseek-ai/cordis` 等）是 type-only、运行时被擦除；若 `pnpm install` 解析不到这些公开包，`pnpm run bundle`（仅 tsdown 打包）仍可独立工作，只是 `tsc` 类型检查跑不了。
+
+## 安装方式（link 即插即用）
+
+本插件是**单一源**（本仓库），直接 `link:` 进 DSH profile 即插即用，无任何副本：
+
+- 主 profile：`~/.dsh/profiles/web/`（dependency `dsh-skill-manager` → link 本仓库；bundles 加 `dsh-skill-manager`）
+- 赤水 profile：`自创项目/赤水/data/dsh-home/profiles/web/`（同上）
+
+改完 `src/` 后 `pnpm run build && pnpm run test` 并提交 `lib/`，重启 DSH 即生效（`link:` 指向源码目录，无需再同步任何副本）。
 
 ## 平台支持
 
@@ -42,3 +55,5 @@ Windows / Linux / macOS。文件操作（停用/重装/删除）按平台生成 
 
 - 插件硬依赖 `webServer` 服务，**仅 web profile**（headless 装不了）。
 - 停用/重装/删除在 Windows 上已做代码级跨平台处理，但未在真机验证；见 `output/windows-verification-checklist.md`（仓库外）。
+- 调用统计是「尽力而为」的观察数据：埋点写入失败会被静默丢弃（不打断技能本身），且只统计本插件运行期间发生的调用，历史调用无法回溯补记。
+- 有效性评测（skill_eval）只负责「触发 + 记录结论」，实际的「带 vs 不带」对比评测由 `darwin-skill` 在对话框外完成，本插件不内置评测器。

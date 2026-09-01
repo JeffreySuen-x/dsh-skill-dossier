@@ -15,9 +15,13 @@
  * `skill-manager/trash` 下，重装/删除前校验路径前缀。
  */
 import { realpath } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { isAbsolute, join, relative } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { formatMatches, matchSkills, type SkillMatch, type SkillProfile } from './match.ts'
+import { DIRECTION_LABELS, detectDirections, isDirectionLabel } from './directions.ts'
+import { formatReview, reviewCandidates } from './freshness.ts'
+import { formatUsage, recordUsage, skillGestures, type UsageRecord } from './usage.ts'
 import { fsEntryOf, isWithin, mkdirCommand, moveNoClobberCommand, removeRecursiveCommand, trashDirOf } from './files.ts'
 
 /** 与 base bundle 选择 bash/pwsh 的分支一致（process.platform === 'win32'）。 */
@@ -49,7 +53,6 @@ export const name = 'skill-manager'
  * before some bundle rows have activated). */
 export const inject = ['skills', 'tools', 'webServer', 'agents']
 
-const DIRECTIONS = ['开发工程', '前端视觉', '研究分析', '内容创作', '知识库', '记忆复盘', '元技能', '工具集成', '其他']
 const NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const MAX_BODY_BYTES = 1024 * 1024
 
@@ -108,6 +111,17 @@ interface IndexEntry {
   notes?: string
   origin?: 'self' | 'external' | 'system' | 'unknown'
   updatedAt: number
+  /** 上次复审时间戳；与 contentHash 一起判断「内容变了但没复审」。 */
+  reviewedAt?: number
+  /** 建档时技能正文的哈希（sha256 前 16 位）。 */
+  contentHash?: string
+  /** 最近一次评测结论（由 darwin-skill 在对话框外产出后写回）。 */
+  evaluation?: {
+    score: number | null
+    judgedAt: number
+    baselineDelta: string | null
+    conclusion: '有效' | '无效' | '待评测'
+  }
 }
 interface TrashRecord {
   name: string
@@ -120,6 +134,7 @@ interface ArchiveIndex {
   version: number
   skills: Record<string, IndexEntry>
   trash: Record<string, TrashRecord>
+  usage: Record<string, UsageRecord>
 }
 
 export function apply(ctx: Context): void {
@@ -175,15 +190,16 @@ export function apply(ctx: Context): void {
   }
 
   function emptyIndex(): ArchiveIndex {
-    return { version: 1, skills: {}, trash: {} }
+    return { version: 1, skills: {}, trash: {}, usage: {} }
   }
 
   function normalizeIndex(parsed: unknown): ArchiveIndex {
-    const p = (parsed ?? {}) as { skills?: unknown; trash?: unknown }
+    const p = (parsed ?? {}) as { skills?: unknown; trash?: unknown; usage?: unknown }
     return {
       version: 1,
       skills: p.skills !== null && typeof p.skills === 'object' ? p.skills as Record<string, IndexEntry> : {},
       trash: p.trash !== null && typeof p.trash === 'object' ? p.trash as Record<string, TrashRecord> : {},
+      usage: p.usage !== null && typeof p.usage === 'object' ? p.usage as Record<string, UsageRecord> : {},
     }
   }
 
@@ -223,6 +239,62 @@ export function apply(ctx: Context): void {
     await runShell(mkdirCommand(join(cwd, '.dsh', 'skill-manager'), IS_WINDOWS), join(cwd, '.dsh'))
     const target = await fs.resolve(join(cwd, '.dsh', 'skill-manager', 'index.json'), { cwd })
     await fs.writeText(target, JSON.stringify(index, null, 2))
+  }
+
+  // ---------- 技能调用埋点（次数/频率统计） ----------
+
+  /** 每个工作区的 index 写锁：读-改-写必须串行，避免 tools/result 的
+   * 异步埋点与显式建档/停用操作相互覆盖。 */
+  const indexWrites = new Map<string, Promise<void>>()
+
+  function withIndexLock<T>(cwd: string, task: () => Promise<T>): Promise<T> {
+    const prev = indexWrites.get(cwd) ?? Promise.resolve()
+    const next = prev.then(task, task)
+    indexWrites.set(cwd, next.then(() => undefined, () => undefined))
+    return next
+  }
+
+  /** 记录一次技能调用：读取 index → 折叠进 usage → 回写。 */
+  function recordSkillUse(cwd: string, name: string): void {
+    if (!NAME_RE.test(name)) return
+    void withIndexLock(cwd, async () => {
+      const index = await readIndex(cwd)
+      recordUsage(index.usage, name, Date.now())
+      await writeIndex(cwd, index)
+    }).catch(() => {
+      // 埋点失败不打断技能本身；调用统计是可丢失的观察数据。
+    })
+  }
+
+  if (ctx.on !== undefined) {
+    // DSH 的 tools/agent 事件经声明合并注册进 cordis Events；本包未把它们纳入
+    // 编译（运行时共存即可），故对 ctx.on 收窄为仅含这两个事件名的签名。
+    type HostEventOn = {
+      (name: 'tools/result', listener: (exec: any, result: any) => void): () => void
+      (name: 'agent/inbox/claimed', listener: (payload: any) => void): () => void
+    }
+    const onEvent = ctx.on as unknown as HostEventOn
+    // ① 模型经 skill 工具加载（tools/result 为 emit，未作用域监听器收到所有 agent 的事件）。
+    onEvent('tools/result', (exec, result) => {
+      if (exec?.name !== 'skill' || result?.isError === true) return
+      const name = exec?.arguments?.name
+      if (typeof name !== 'string' || name === '') return
+      const cwd = exec?.agent?.session?.header?.cwd
+      if (typeof cwd !== 'string') return
+      recordSkillUse(cwd, name)
+    })
+    // ② 用户 /name 手势（模型工具之外的另一条调用路径）。
+    onEvent('agent/inbox/claimed', (payload) => {
+      const cwd = payload?.agent?.session?.header?.cwd
+      if (typeof cwd !== 'string') return
+      const message = payload?.message
+      if (message === null || typeof message !== 'object' || message.source?.kind !== 'user') return
+      const blocks = Array.isArray(message.content) ? message.content : []
+      for (const block of blocks) {
+        if (block === null || typeof block !== 'object' || block.type !== 'text' || typeof block.text !== 'string') continue
+        for (const name of skillGestures(block.text)) recordSkillUse(cwd, name)
+      }
+    })
   }
 
   // ---------- 技能匹配（模型工具 skill_match 与浏览器 RPC match 共用） ----------
@@ -277,6 +349,46 @@ export function apply(ctx: Context): void {
     return { matches, total, text }
   }
 
+  /**
+   * 两段式路由：先用关键词命中判方向，再在命中方向内做词法检索。
+   * 未命中方向时退化为全局检索并提示可选方向。
+   * @param agent 当前会话 agent
+   * @param args { query, topK? }
+   */
+  const runRoute = async (agent: AgentLike, args: any): Promise<MatchOutcome> => {
+    const query = typeof args?.query === 'string' ? args.query.trim() : ''
+    if (query === '') return runMatch(agent, args)
+    const cwd = agent.session.header.cwd
+    const index = await readIndex(cwd)
+    const profiles: SkillProfile[] = Object.values(index.skills).filter(
+      (e) => typeof e.direction === 'string' && e.direction !== '',
+    )
+    const total = profiles.length
+    if (total === 0) return runMatch(agent, args)
+    const lookup = { scope: agent as unknown, cwd }
+    let extraText = new Map<string, string>()
+    try {
+      const summaries = await skills.list(lookup)
+      extraText = new Map(summaries.map((s) => [s.name, `${s.description} ${typeof s.whenToUse === 'string' ? s.whenToUse : ''}`]))
+    } catch {
+      // 注册表描述缺失不影响匹配
+    }
+    const rawTopK = typeof args?.topK === 'number' ? Math.trunc(args.topK) : 5
+    const topK = Math.min(20, Math.max(1, Number.isFinite(rawTopK) ? rawTopK : 5))
+
+    const dirs = detectDirections(query)
+    const scoped = dirs.length === 0 ? profiles : profiles.filter((p) => p.direction !== undefined && dirs.includes(p.direction))
+    const matches = matchSkills(query, scoped, { topK }, extraText)
+    let text: string
+    if (dirs.length === 0) {
+      text = formatMatches(matches, total, query)
+      text += `\n（未命中方向关键词，已做全局检索；可指定方向：${DIRECTION_LABELS.join('、')}）`
+    } else {
+      text = `命中方向：${dirs.join('、')}\n\n${formatMatches(matches, scoped.length, query)}`
+    }
+    return { matches, total, text }
+  }
+
   // ---------- 模型工具：skill_archive ----------
 
   if (tools !== undefined) {
@@ -287,7 +399,7 @@ export function apply(ctx: Context): void {
         type: 'object',
         properties: {
           name: { type: 'string', description: '技能名（kebab-case）' },
-          direction: { type: 'string', description: `方向分类，如：${DIRECTIONS.join('/')}` },
+          direction: { type: 'string', description: `方向分类，如：${DIRECTION_LABELS.join('/')}` },
           useScope: { type: 'string', description: '使用范围：适用于哪些任务与场景' },
           boundaries: { type: 'string', description: '能力边界：做不到什么、何时不适用' },
           scenarios: { type: 'string', description: '应用场景：典型用例' },
@@ -314,8 +426,9 @@ export function apply(ctx: Context): void {
         if (agent === undefined) throw new Error('无法确定当前会话')
         const cwd = agent.session.header.cwd
         const lookup = { scope: agent as unknown, cwd }
-        const exists = (await skills.list(lookup)).some((s) => s.name === name)
-        if (!exists) throw new Error(`技能 "${name}" 不存在，请先安装或注册`)
+        const summary = (await skills.list(lookup)).find((s) => s.name === name)
+        if (summary === undefined) throw new Error(`技能 "${name}" 不存在，请先安装或注册`)
+        if (summary.source === 'bundled') throw new Error(`技能 "${name}" 是 DSH 原生技能（bundled），由 harness 自行检索，无需建档`)
         const direction = typeof args.direction === 'string' ? args.direction.trim() : ''
         const useScope = typeof args.useScope === 'string' ? args.useScope.trim() : ''
         const boundaries = typeof args.boundaries === 'string' ? args.boundaries.trim() : ''
@@ -323,10 +436,18 @@ export function apply(ctx: Context): void {
         if (direction === '' || useScope === '' || boundaries === '' || scenarios === '') {
           throw new Error('direction/useScope/boundaries/scenarios 均不能为空')
         }
+        if (!isDirectionLabel(direction)) {
+          throw new Error(`无效的方向「${direction}」。可选：${DIRECTION_LABELS.join('、')}`)
+        }
         const origin: 'self' | 'external' | 'system' | 'unknown' = args.origin === 'self' || args.origin === 'external' || args.origin === 'system' || args.origin === 'unknown'
           ? args.origin
           : 'unknown'
+        const definition = await skills.get(name, lookup)
+        const contentHash = definition === undefined
+          ? undefined
+          : createHash('sha256').update(definition.content).digest('hex').slice(0, 16)
         const index = await readIndex(cwd)
+        const now = Date.now()
         index.skills[name] = {
           name,
           direction,
@@ -335,7 +456,9 @@ export function apply(ctx: Context): void {
           scenarios,
           notes: typeof args.notes === 'string' && args.notes.trim() !== '' ? args.notes.trim() : undefined,
           origin,
-          updatedAt: Date.now(),
+          updatedAt: now,
+          reviewedAt: now,
+          ...(contentHash !== undefined ? { contentHash } : {}),
         }
         await writeIndex(cwd, index)
         return { ok: true, message: `已为技能 "${name}" 建档（方向：${direction}）` }
@@ -350,7 +473,7 @@ export function apply(ctx: Context): void {
         properties: {
           query: { type: 'string', description: '当前任务/目标的一句话描述（中文或英文），例如「调研某城市未来 20 年发展」「帮我写一个登录页面」' },
           topK: { type: 'integer', description: '返回最相关的候选条数，默认 5，范围 1-20' },
-          direction: { type: 'string', description: `可选：只在该方向分类内匹配（${DIRECTIONS.join('/')}）` },
+          direction: { type: 'string', description: `可选：只在该方向分类内匹配（${DIRECTION_LABELS.join('/')}）` },
         },
         required: ['query'],
       },
@@ -386,6 +509,178 @@ export function apply(ctx: Context): void {
         const agent = exec.agent as AgentLike | undefined
         if (agent === undefined) throw new Error('无法确定当前会话')
         return runMatch(agent, args)
+      },
+    })
+
+    tools.register({
+      name: 'skill_route',
+      description: '两段式技能路由：先用关键词命中判断任务属于哪个方向（工程代码/前端视觉/调研报告/内容写作/知识库/记忆会话/多代理编排/本地模型/元技能/命理玄学），再返回该方向内最相关的技能候选。比 skill_match 更省 token、更聚焦；命中候选后用 skill 工具加载全文。',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: '当前任务/目标的一句话描述，例如「调研某行业前景」「写一个落地页」' },
+          topK: { type: 'integer', description: '返回最相关的候选条数，默认 5，范围 1-20' },
+        },
+        required: ['query'],
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            matches: { type: 'array', items: { type: 'object', additionalProperties: true } },
+            total: { type: 'integer' },
+            text: { type: 'string' },
+          },
+        },
+        render: (_args: unknown, value: any) => [{ type: 'text', text: String(value.text ?? '') }],
+      },
+      async execute(args: any, exec: any): Promise<{ matches: SkillMatch[]; total: number; text: string }> {
+        const query = typeof args.query === 'string' ? args.query.trim() : ''
+        if (query === '') throw new Error('请提供 query：当前任务的一句话描述')
+        const agent = exec.agent as AgentLike | undefined
+        if (agent === undefined) throw new Error('无法确定当前会话')
+        return runRoute(agent, args)
+      },
+    })
+
+    tools.register({
+      name: 'skill_usage',
+      description: '查看技能被调用的次数与频率统计（由本插件自动记录：模型经 skill 工具加载、或用户用 /name 手势调用都会计数）。省略 name 返回所有被调用过的技能（按次数降序）；给定 name 只看该技能的明细。',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: '可选：只看某个技能（kebab-case）；省略则返回所有被调用过的技能' },
+        },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            text: { type: 'string' },
+          },
+        },
+        render: (_args: unknown, value: any) => [{ type: 'text', text: String(value.text ?? '') }],
+      },
+      async execute(args: any, exec: any): Promise<{ text: string }> {
+        const agent = exec.agent as AgentLike | undefined
+        if (agent === undefined) throw new Error('无法确定当前会话')
+        const index = await readIndex(agent.session.header.cwd)
+        const name = typeof args?.name === 'string' && args.name.trim() !== '' ? args.name.trim() : undefined
+        return { text: formatUsage(index.usage, name, Date.now()) }
+      },
+    })
+
+    tools.register({
+      name: 'skill_review',
+      description: '找出待复审的技能（保鲜信号）：易变方向 + 长期未用 + 从未/久未复审，按优先级排序。用于决定「哪个 skill 该跑一轮 darwin-skill 评测/更新」。',
+      parameters: {
+        type: 'object',
+        properties: {
+          topK: { type: 'integer', description: '返回前几条待复审，默认 10' },
+        },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            text: { type: 'string' },
+          },
+        },
+        render: (_args: unknown, value: any) => [{ type: 'text', text: String(value.text ?? '') }],
+      },
+      async execute(args: any, exec: any): Promise<{ text: string }> {
+        const agent = exec.agent as AgentLike | undefined
+        if (agent === undefined) throw new Error('无法确定当前会话')
+        const index = await readIndex(agent.session.header.cwd)
+        const rawTopK = typeof args?.topK === 'number' ? Math.trunc(args.topK) : 10
+        const topK = Math.min(50, Math.max(1, Number.isFinite(rawTopK) ? rawTopK : 10))
+        const entries = reviewCandidates(index.skills, index.usage, Date.now(), topK)
+        return { text: formatReview(entries, Object.keys(index.skills).length) }
+      },
+    })
+
+    tools.register({
+      name: 'skill_eval',
+      description: '触发对某个技能的有效性评测（对话框外）：加载 darwin-skill，用「带 skill vs 不带 skill」对比 + 中立 judge 评测该技能，然后用 record_eval 工具把结论写回档案。',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: '要评测的技能名（kebab-case）' },
+        },
+        required: ['name'],
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            ok: { type: 'boolean' },
+            message: { type: 'string' },
+          },
+        },
+        render: (_args: unknown, value: any) => [{ type: 'text', text: String(value.message ?? '') }],
+      },
+      async execute(args: any, exec: any): Promise<{ ok: boolean; message: string }> {
+        const name = typeof args.name === 'string' ? args.name.trim() : ''
+        if (!NAME_RE.test(name)) throw new Error(`无效的技能名：${name}`)
+        const agent = exec.agent as (AgentLike & { followup(message: unknown): void }) | undefined
+        if (agent === undefined) throw new Error('无法确定当前会话')
+        const lookup = { scope: agent as unknown, cwd: agent.session.header.cwd }
+        const summary = (await skills.list(lookup)).find((s) => s.name === name)
+        if (summary === undefined) throw new Error(`技能 "${name}" 不存在`)
+        agent.followup(userMessage(
+          `请加载 darwin-skill，对技能「${name}」做一轮有效性评测：用「带 skill vs 不带 skill」跑同一基准任务、让中立 judge 打分，得出 score(0-10) 与 delta 描述，然后用 record_eval 工具把结论写回。`,
+        ))
+        return { ok: true, message: `已触发对技能 "${name}" 的评测（对话框外执行）` }
+      },
+    })
+
+    tools.register({
+      name: 'record_eval',
+      description: '把 darwin-skill 的评测结论写回技能档案：score(0-10)、baselineDelta(用 vs 不用的差异描述)、conclusion(有效/无效/待评测)。',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: '技能名（kebab-case）' },
+          score: { type: 'number', description: '评测得分 0-10' },
+          baselineDelta: { type: 'string', description: '用 skill vs 不用的差异（一句话）' },
+          conclusion: { type: 'string', description: '有效 / 无效 / 待评测' },
+        },
+        required: ['name', 'conclusion'],
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            ok: { type: 'boolean' },
+            message: { type: 'string' },
+          },
+        },
+        render: (_args: unknown, value: any) => [{ type: 'text', text: String(value.message ?? '') }],
+      },
+      async execute(args: any, exec: any): Promise<{ ok: boolean; message: string }> {
+        const name = typeof args.name === 'string' ? args.name.trim() : ''
+        if (!NAME_RE.test(name)) throw new Error(`无效的技能名：${name}`)
+        const agent = exec.agent as AgentLike | undefined
+        if (agent === undefined) throw new Error('无法确定当前会话')
+        const index = await readIndex(agent.session.header.cwd)
+        const entry = index.skills[name]
+        if (entry === null || typeof entry !== 'object') throw new Error(`技能 "${name}" 未建档`)
+        const conclusion: '有效' | '无效' | '待评测' = args.conclusion === '有效' || args.conclusion === '无效' || args.conclusion === '待评测'
+          ? args.conclusion
+          : '待评测'
+        entry.evaluation = {
+          score: typeof args.score === 'number' && Number.isFinite(args.score) ? args.score : null,
+          judgedAt: Date.now(),
+          baselineDelta: typeof args.baselineDelta === 'string' && args.baselineDelta.trim() !== '' ? args.baselineDelta.trim() : null,
+          conclusion,
+        }
+        await writeIndex(agent.session.header.cwd, index)
+        return { ok: true, message: `已记录技能 "${name}" 的评测结论：${conclusion}` }
       },
     })
   }
@@ -506,7 +801,7 @@ export function apply(ctx: Context): void {
         ? `先读取技能内容（路径：${skill.path}），`
         : '先用 skill 工具加载该技能，'
       const prompt = `请为技能「${name}」建档：${source}`
-        + `分析它属于哪个方向（候选：${DIRECTIONS.join('、')}），`
+        + `分析它属于哪个方向（候选：${DIRECTION_LABELS.join('、')}），`
         + '然后调用 skill_archive 工具填写：方向 direction、使用范围 useScope、能力边界 boundaries、应用场景 scenarios。'
       agent.followup(userMessage(prompt))
       return { ok: true }

@@ -4,11 +4,12 @@
  * 组件自包含（按钮 + 弹层），无宿主 hook 依赖。
  */
 import { useEffect, useState } from 'react'
+import type { ReactNode } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from 'react'
 import type { SkillManagerInjected, ThemeScheme } from './index.ts'
+import { DIRECTION_LABELS } from '../directions.ts'
 import css from './Panel.module.css'
 
-const DIRECTIONS = ['开发工程', '前端视觉', '研究分析', '内容创作', '知识库', '记忆复盘', '元技能', '工具集成', '其他']
 const NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const FS_SOURCES = ['project-dsh', 'project-agents', 'user-dsh', 'user-agents', 'custom']
 type Origin = 'self' | 'external' | 'system' | 'unknown'
@@ -43,9 +44,17 @@ interface TrashRecord {
   root: string
   removedAt: number
 }
+interface UsageRecord {
+  count: number
+  firstUsedAt: number
+  lastUsedAt: number
+  daily: Record<string, number>
+  recent: number[]
+}
 interface IndexData {
   skills: Record<string, Profile>
   trash: Record<string, TrashRecord>
+  usage: Record<string, UsageRecord>
 }
 interface Detail extends Summary {
   content: string
@@ -64,6 +73,39 @@ interface MatchItem {
   score: number
   matched: string[]
 }
+interface ReportProject {
+  name: string
+  purpose?: string
+  impl?: string
+  progress: string[]
+  todo: string[]
+  issues: string[]
+}
+interface ReportDaily {
+  date: string
+  projects: ReportProject[]
+  stats?: { projects: number; progress: number; todo: number; issues: number }
+  source?: string
+  lastError?: string
+  fallbackFrom?: string
+}
+interface ReportDay {
+  date: string
+  projects: string[]
+  progress: string[]
+  todo: string[]
+  issues: string[]
+}
+interface ReportMonthly {
+  month: string
+  days: ReportDay[]
+  projects: ReportProject[]
+  source?: string
+  lastError?: string
+  fallbackMonth?: string
+}
+type ReportData = ReportDaily | ReportMonthly
+type ReportView = 'daily' | 'monthly'
 
 async function rpc<T = unknown>(method: string, args?: unknown): Promise<T> {
   const res = await fetch('/api/skill-manager', {
@@ -85,12 +127,13 @@ async function rpc<T = unknown>(method: string, args?: unknown): Promise<T> {
 
 function normalizeList(res: unknown): ListResult {
   const r = (res ?? {}) as { skills?: unknown; index?: unknown }
-  const idx = (r.index ?? {}) as { skills?: unknown; trash?: unknown }
+  const idx = (r.index ?? {}) as { skills?: unknown; trash?: unknown; usage?: unknown }
   return {
     skills: Array.isArray(r.skills) ? r.skills as Summary[] : [],
     index: {
       skills: idx.skills !== null && typeof idx.skills === 'object' ? idx.skills as Record<string, Profile> : {},
       trash: idx.trash !== null && typeof idx.trash === 'object' ? idx.trash as Record<string, TrashRecord> : {},
+      usage: idx.usage !== null && typeof idx.usage === 'object' ? idx.usage as Record<string, UsageRecord> : {},
     },
   }
 }
@@ -100,7 +143,7 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
   const [scheme, setScheme] = useState<ThemeScheme>(() => themeScheme.get())
   const [data, setData] = useState<ListResult | null>(null)
   const [query, setQuery] = useState('')
-  const [tab, setTab] = useState<'skills' | 'archive' | 'match'>('skills')
+  const [tab, setTab] = useState<'skills' | 'archive' | 'match' | 'usage' | 'report'>('skills')
   const [view, setView] = useState<'list' | 'detail' | 'create'>('list')
   const [detail, setDetail] = useState<Detail | null>(null)
   const [filter, setFilter] = useState('all')
@@ -113,13 +156,19 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
   const [matchTotal, setMatchTotal] = useState(0)
   const [matchBusy, setMatchBusy] = useState(false)
   const [matchError, setMatchError] = useState('')
+  const [reportView, setReportView] = useState<ReportView>('daily')
+  const [reportData, setReportData] = useState<ReportData | null>(null)
+  const [reportLoading, setReportLoading] = useState(false)
+  const [reportBusy, setReportBusy] = useState(false)
+  const [reportError, setReportError] = useState('')
+  const [reportNotice, setReportNotice] = useState('')
 
   const reload = () => {
     setData(null)
     rpc<ListResult>('list', { sessionId })
       .then((res) => setData(normalizeList(res)))
       .catch((error: unknown) => {
-        setData({ skills: [], index: { skills: {}, trash: {} } })
+        setData({ skills: [], index: { skills: {}, trash: {}, usage: {} } })
         setNotice(String(error))
       })
   }
@@ -132,7 +181,7 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
       .then((res) => { if (!cancelled) setData(normalizeList(res)) })
       .catch((error: unknown) => {
         if (!cancelled) {
-          setData({ skills: [], index: { skills: {}, trash: {} } })
+          setData({ skills: [], index: { skills: {}, trash: {}, usage: {} } })
           setNotice(String(error))
         }
       })
@@ -143,6 +192,7 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
 
   const profiles = data?.index.skills ?? {}
   const trash = data?.index.trash ?? {}
+  const usage = data?.index.usage ?? {}
   const skills = data?.skills ?? null
   const activeNames = skills === null ? null : new Set(skills.map((s) => s.name))
   const hasProfile = (name: string) => Object.prototype.hasOwnProperty.call(profiles, name)
@@ -403,7 +453,7 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
     const profiledNames = Object.keys(profiles)
     const unprofiled = skills === null ? [] : skills.filter((s) => !hasProfile(s.name))
     const trashedNames = Object.keys(trash)
-    const directionSet = new Set<string>(DIRECTIONS)
+    const directionSet = new Set<string>(DIRECTION_LABELS)
     for (const n of profiledNames) {
       const d = profiles[n]?.direction
       if (typeof d === 'string' && d !== '') directionSet.add(d)
@@ -561,19 +611,225 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
     </div>
   )
 
+  // ---------- 使用统计 ----------
+
+  const fmtDay = (ts: number) => {
+    const d = new Date(ts)
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    return `${d.getFullYear()}-${m}-${day}`
+  }
+
+  const usageBody = () => {
+    const entries = Object.entries(usage)
+      .map(([name, rec]) => {
+        const activeDays = Object.keys(rec.daily).length
+        const callsPerDay = activeDays === 0 ? rec.count : Math.round((rec.count / activeDays) * 10) / 10
+        return { name, rec, activeDays, callsPerDay }
+      })
+      .sort((a, b) => b.rec.count - a.rec.count || b.rec.lastUsedAt - a.rec.lastUsedAt || a.name.localeCompare(b.name))
+    const totalCalls = entries.reduce((acc, e) => acc + e.rec.count, 0)
+    const dailyText = (rec: UsageRecord) => Object.entries(rec.daily)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .slice(-6)
+      .map(([d, n]) => `${d.slice(5)}×${n}`)
+      .join(' ')
+    return (
+      <>
+        {entries.length === 0
+          ? <div className={css.hint}>还没有调用记录。技能被 skill 工具加载、或用户用 /name 手势调用后会自动记录。</div>
+          : (
+            <>
+              <div className={css.sectionTitle}>共 {entries.length} 个技能被调用过（总计 {totalCalls} 次）</div>
+              <div className={css.list}>
+                {entries.map(({ name, rec, activeDays, callsPerDay }) => (
+                  <div key={name} className={css.row}>
+                    <div className={css.rowMain}>
+                      <div className={css.rowName}>
+                        {name}
+                        <span className={`${css.badge} ${css.badgeOk}`}>{rec.count} 次</span>
+                        <span className={css.badge}>平均 {callsPerDay} 次/天</span>
+                      </div>
+                      <div className={css.rowDesc}>
+                        首次 {fmtDay(rec.firstUsedAt)} · 最近 {fmtDay(rec.lastUsedAt)} · 活跃 {activeDays} 天
+                      </div>
+                      <div className={css.rowDesc}>近 6 天：{dailyText(rec) || '—'}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+      </>
+    )
+  }
+
+  // ---------- 汇报（调用 dsh-report 后端 /api/report） ----------
+
+  const reportRpc = async <T,>(method: string, args?: unknown): Promise<T> => {
+    const res = await fetch('/api/report', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ method, args }),
+    })
+    let data: any = null
+    try {
+      data = await res.json()
+    } catch {
+      data = null
+    }
+    if (!res.ok || data === null) {
+      throw new Error(!res.ok && data !== null && typeof data.error === 'string' ? data.error : `HTTP ${res.status}`)
+    }
+    return data as T
+  }
+
+  const loadReport = (view: ReportView = reportView) => {
+    setReportLoading(true)
+    setReportError('')
+    setReportNotice('')
+    setReportData(null)
+    const method = view === 'monthly' ? 'generateMonthly' : 'generateDaily'
+    reportRpc<ReportData>(method, { sessionId })
+      .then((data) => { setReportData(data); setReportLoading(false) })
+      .catch((error: unknown) => { setReportError(String(error)); setReportLoading(false) })
+  }
+
+  const runReview = () => {
+    setReportBusy(true)
+    setReportError('')
+    setReportNotice('')
+    reportRpc<{ ok: boolean; message?: string; error?: string }>('review', { sessionId })
+      .then((res) => {
+        setReportBusy(false)
+        setReportNotice(res?.ok ? (res.message ?? '已触发复盘') : (res?.error ?? '复盘失败'))
+      })
+      .catch((error: unknown) => { setReportBusy(false); setReportError(String(error)) })
+  }
+
+  const runExport = () => {
+    setReportBusy(true)
+    setReportError('')
+    setReportNotice('')
+    reportRpc<{ ok: boolean; error?: string; jsonPath?: string; mdPath?: string }>('export', { sessionId, view: reportView })
+      .then((res) => {
+        setReportBusy(false)
+        setReportNotice(res?.ok ? `已导出：${res.mdPath}、${res.jsonPath}` : (res?.error ?? '导出失败'))
+      })
+      .catch((error: unknown) => { setReportBusy(false); setReportError(String(error)) })
+  }
+
+  const reportItems = (items: string[] | undefined, empty: string) => {
+    const list = items ?? []
+    if (list.length === 0) return <li className={css.muted}>{empty}</li>
+    return list.map((item, index) => <li key={index}>{item}</li>)
+  }
+
+  const reportProjects = (projects: ReportProject[] | undefined) => {
+    const list = projects ?? []
+    if (list.length === 0) {
+      return <div className={css.hint}>暂无记录。按 brief skill 维护 reporter/brief/YYYY-MM-DD.md，这里会自动汇总。</div>
+    }
+    return (
+      <div className={css.reportSec}>
+        <div className={css.sectionTitle}>进行项目（{list.length}）</div>
+        {list.map((project, index) => (
+          <div key={`${project.name}-${index}`} className={css.reportProject}>
+            <strong>{index + 1}、{project.name}</strong>
+            {project.purpose ? <div>作用：{project.purpose}</div> : null}
+            {project.impl ? <div>实现：{project.impl}</div> : null}
+            <div>今日进度：</div>
+            <ul>{reportItems(project.progress, '（暂无）')}</ul>
+            <div>待办：</div>
+            <ul>{reportItems(project.todo, '（无）')}</ul>
+            <div>问题：</div>
+            <ul>{reportItems(project.issues, '（无）')}</ul>
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  const reportBody = () => {
+    const data = reportData
+    let content: ReactNode = null
+    if (reportLoading) content = <div className={css.hint}>读取 brief…</div>
+    else if (reportError !== '') content = <div className={css.notice}>{reportError}</div>
+    else if (reportNotice !== '') content = <div className={css.reportNotice}>{reportNotice}</div>
+    else if (data !== null) {
+      if (reportView === 'monthly' && 'days' in data) {
+        const monthly = data as ReportMonthly
+        content = (
+          <>
+            <div className={css.reportSec}>
+              <div className={css.sectionTitle}>
+                按日（{monthly.month}）{monthly.fallbackMonth ? ` · 回退自 ${monthly.fallbackMonth}` : ''}
+              </div>
+              {(monthly.days ?? []).length === 0
+                ? <div className={css.hint}>该月暂无记录。</div>
+                : (
+                  <table className={css.reportTable}>
+                    <thead>
+                      <tr><th>日期</th><th>项目</th><th>进度</th><th>待办</th><th>问题</th></tr>
+                    </thead>
+                    <tbody>
+                      {monthly.days.map((day) => (
+                        <tr key={day.date}>
+                          <td>{day.date}</td>
+                          <td>{(day.projects ?? []).join('、')}</td>
+                          <td>{(day.progress ?? []).join('；')}</td>
+                          <td>{(day.todo ?? []).join('；')}</td>
+                          <td>{(day.issues ?? []).join('；')}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+            </div>
+            {reportProjects(monthly.projects)}
+          </>
+        )
+      } else {
+        const daily = data as ReportDaily
+        content = (
+          <>
+            <div className={css.reportSec}>
+              <div className={css.sectionTitle}>
+                每日简报（{daily.date}）{daily.fallbackFrom ? ` · 回退自 ${daily.fallbackFrom}` : ''}
+              </div>
+              {daily.stats ? <div className={css.hint}>共 {daily.stats.projects} 个项目 · {daily.stats.progress} 条进度 · {daily.stats.todo} 条待办 · {daily.stats.issues} 条问题</div> : null}
+            </div>
+            {reportProjects(daily.projects)}
+          </>
+        )
+      }
+    }
+    return (
+      <div className={css.reportBody}>
+        <div className={css.reportActions}>
+          <button type="button" className={`${css.reportViewBtn}${reportView === 'daily' ? ` ${css.reportViewBtnActive}` : ''}`} disabled={reportBusy} onClick={() => { setReportView('daily'); loadReport('daily') }}>日报</button>
+          <button type="button" className={`${css.reportViewBtn}${reportView === 'monthly' ? ` ${css.reportViewBtnActive}` : ''}`} disabled={reportBusy} onClick={() => { setReportView('monthly'); loadReport('monthly') }}>月度</button>
+          <button type="button" className={css.reportViewBtn} disabled={reportBusy} onClick={runReview}>复盘</button>
+          <button type="button" className={css.reportViewBtn} disabled={reportBusy} onClick={runExport}>导出</button>
+        </div>
+        {content}
+      </div>
+    )
+  }
+
   // ---------- 骨架 ----------
 
-  const headerTitle = tab === 'archive' ? '技能档案' : tab === 'match' ? '技能匹配' : view === 'create' ? '新建技能' : view === 'detail' ? '技能详情' : 'Skills'
+  const headerTitle = tab === 'archive' ? '技能档案' : tab === 'match' ? '技能匹配' : tab === 'usage' ? '使用统计' : tab === 'report' ? '汇报' : view === 'create' ? '新建技能' : view === 'detail' ? '技能详情' : '管理'
 
   return (
     <div className={css.wrap} data-theme={scheme}>
       <button
         type="button"
         className={`${css.toggle}${open ? ` ${css.toggleActive}` : ''}`}
-        title="Skills：识别建档、管理与调用技能"
+        title="管理：技能全生命周期 + 汇报"
         onClick={() => setOpen(!open)}
       >
-        Skills
+        管理
       </button>
       {open ? (
         <div className={css.panel} onKeyDown={onKeyDown}>
@@ -588,13 +844,19 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
             <button type="button" className={`${css.tab}${tab === 'skills' ? ` ${css.tabActive}` : ''}`} onClick={() => { setTab('skills'); setView('list'); setDetail(null); setNotice('') }}>技能</button>
             <button type="button" className={`${css.tab}${tab === 'match' ? ` ${css.tabActive}` : ''}`} onClick={() => { setTab('match'); setNotice('') }}>匹配</button>
             <button type="button" className={`${css.tab}${tab === 'archive' ? ` ${css.tabActive}` : ''}`} onClick={() => { setTab('archive'); setNotice('') }}>档案</button>
+            <button type="button" className={`${css.tab}${tab === 'usage' ? ` ${css.tabActive}` : ''}`} onClick={() => { setTab('usage'); setNotice('') }}>统计</button>
+            <button type="button" className={`${css.tab}${tab === 'report' ? ` ${css.tabActive}` : ''}`} onClick={() => { setTab('report'); setNotice(''); if (reportData === null && !reportLoading) loadReport() }}>汇报</button>
           </div>
           {notice !== '' ? <div className={css.notice}>{notice}</div> : null}
           {tab === 'match'
             ? matchBody()
             : tab === 'archive'
               ? archiveBody()
-              : view === 'list' ? listBody() : view === 'detail' ? detailBody() : createBody()}
+              : tab === 'usage'
+                ? usageBody()
+                : tab === 'report'
+                  ? reportBody()
+                  : view === 'list' ? listBody() : view === 'detail' ? detailBody() : createBody()}
           <div className={`${css.hint} ${css.footer}`}>
             来源标注：自创=自己创建 · 外来=下载/他人 · 系统=随 DSH 内置 · 未标注=尚未标记（点击徽标即可切换）。
             新加入 .dsh/skills 或 ~/.dsh/skills 的技能会自动出现在「技能」页；档案保存在 {'<工作区>'}/.dsh/skill-manager/index.json。

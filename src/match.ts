@@ -5,6 +5,7 @@
  * 评分是朴素的文本启发式：方向关键词命中 + 字符二元组重叠 + 技能名
  * 词元命中。它不追求语义精确，只负责「把明显相关的排在前面」。
  */
+import { detectDirections } from './directions.ts'
 
 /** 建档技能档案里参与匹配的最小字段集。 */
 export interface SkillProfile {
@@ -30,20 +31,6 @@ export interface SkillMatch {
 export interface MatchOptions {
   topK: number
   direction?: string
-}
-
-/** ponytail: 朴素方向关键词表，只覆盖常见触发词，用于给「方向」投票；
- * 升级路径是建档时给每个技能产出 embedding，检索时用向量相似度重排。 */
-const DIRECTION_KEYWORDS: Record<string, string[]> = {
-  '开发工程': ['代码', '编程', '编码', '写码', 'bug', '调试', '接口', '模块', '实现', '重构', '测试', '架构', '选型', 'review', '工单', 'ticket', 'tdd', 'codebase'],
-  '前端视觉': ['前端', '页面', 'ui', 'ux', '设计', '视觉', 'landing', '官网', '网页', '样式', 'css', '动效', '仪表盘', 'dashboard', '组件', '品牌', '布局', '响应式'],
-  '研究分析': ['调研', '研究', '分析', '报告', '行业', '城市', '数据', '方案', '情报', '论文', '深度', '前景'],
-  '内容创作': ['写作', '文案', '脚本', '视频', '播客', '文章', '内容', '创作', '剪辑', '稿'],
-  '知识库': ['知识库', '笔记', 'obsidian', 'vault', 'wiki', '溯源', '存档', '第二大脑', '资料'],
-  '记忆复盘': ['记忆', '复盘', '总结', '摘要', '回顾', '周报', '经验', '偏好', '会话'],
-  '元技能': ['skill', '技能', 'agent', '提示词', 'prompt', '工作流', '编排', '子代理'],
-  '工具集成': ['工具', '集成', 'mcp', 'api', '插件', '自动化', '命令行', 'cli'],
-  '其他': [],
 }
 
 const TRUNCATE = 160
@@ -82,15 +69,6 @@ function overlapScore(query: string, target: string): number {
 
 function nameTokens(name: string): string[] {
   return name.toLowerCase().split('-').filter((t) => t.length >= 2)
-}
-
-function detectDirections(query: string): string[] {
-  const q = query.toLowerCase()
-  const hits: string[] = []
-  for (const [direction, keywords] of Object.entries(DIRECTION_KEYWORDS)) {
-    if (keywords.some((k) => q.includes(k.toLowerCase()))) hits.push(direction)
-  }
-  return hits
 }
 
 /**

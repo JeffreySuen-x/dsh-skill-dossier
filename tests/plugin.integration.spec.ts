@@ -37,6 +37,7 @@ function hostContext(options: {
   indexReadError?: Error
   shellRun?: (request: any) => Promise<{ exitCode: number; stderr?: { text?: string } }>
   skill?: FakeSkill
+  listSkills?: (view: unknown, visible: FakeSkill[]) => Promise<FakeSkill[]>
 } = {}) {
   const routes = new Map<string, Route>()
   const services = new Map<string, unknown>()
@@ -89,7 +90,10 @@ function hostContext(options: {
   }
 
   const rootSkills = {
-    list: async (view?: unknown) => visibleSkills(sessionIdOf(view)),
+    list: async (view?: unknown) => {
+      const visible = visibleSkills(sessionIdOf(view))
+      return options.listSkills === undefined ? visible : options.listSkills(view, visible)
+    },
     get: async (name: string, view?: unknown) => visibleSkills(sessionIdOf(view)).find((skill) => skill.name === name),
     register: (skill: unknown) => registerInto(globalRuntime, skill),
   }
@@ -386,6 +390,60 @@ describe('single-package host activation', () => {
     expect(sessionSkillNames('session-1')).toEqual([])
     expect(sessionSkillNames('session-2')).toEqual([])
     expect(routes.size).toBe(0)
+  })
+
+  it('does not register after plugin disposal wins an in-flight catalog lookup', async () => {
+    let releaseList!: () => void
+    let markListStarted!: () => void
+    const listStarted = new Promise<void>((resolve) => { markListStarted = resolve })
+    const listReleased = new Promise<void>((resolve) => { releaseList = resolve })
+    const { ctx, routes, disposePlugin, sessionSkillNames } = hostContext({
+      listSkills: async (_view, visible) => {
+        markListStarted()
+        await listReleased
+        return visible
+      },
+    })
+    apply(ctx as never)
+    const route = routes.get('/api/skill-manager')!
+    const request = post(route, {
+      method: 'register',
+      args: { sessionId: 'session-1', name: 'too-late', description: 'Temporary', content: 'body' },
+    })
+    await listStarted
+
+    disposePlugin()
+    releaseList()
+
+    expect((await request).body).toEqual({ ok: false, error: '插件或当前会话已停止' })
+    expect(sessionSkillNames('session-1')).toEqual([])
+  })
+
+  it('does not register after session disposal wins an in-flight catalog lookup', async () => {
+    let releaseList!: () => void
+    let markListStarted!: () => void
+    const listStarted = new Promise<void>((resolve) => { markListStarted = resolve })
+    const listReleased = new Promise<void>((resolve) => { releaseList = resolve })
+    const { ctx, routes, disposeSession, sessionSkillNames } = hostContext({
+      listSkills: async (_view, visible) => {
+        markListStarted()
+        await listReleased
+        return visible
+      },
+    })
+    apply(ctx as never)
+    const route = routes.get('/api/skill-manager')!
+    const request = post(route, {
+      method: 'register',
+      args: { sessionId: 'session-1', name: 'too-late', description: 'Temporary', content: 'body' },
+    })
+    await listStarted
+
+    disposeSession('session-1')
+    releaseList()
+
+    expect((await request).body).toEqual({ ok: false, error: '插件或当前会话已停止' })
+    expect(sessionSkillNames('session-1')).toEqual([])
   })
 
   it('surfaces a corrupt manager index instead of replacing it with an empty one', async () => {

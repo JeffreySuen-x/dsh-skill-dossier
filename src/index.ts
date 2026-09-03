@@ -121,7 +121,9 @@ export function apply(ctx: Context): void {
 
   const owned = new Map<AgentLike, Map<string, () => void>>()
   const temporaryBarriers = new WeakMap<AgentLike, Promise<void>>()
+  let active = true
   ctx.effect(() => () => {
+    active = false
     for (const registrations of owned.values()) {
       for (const dispose of registrations.values()) dispose()
     }
@@ -774,10 +776,14 @@ export function apply(ctx: Context): void {
       const agent = agentOf(sessionId)
       if (agent === undefined) return { ok: false, error: '当前会话没有活跃的 agent' }
       return enqueueTemporary(agent, async () => {
+        if (!active) return { ok: false, error: '插件或当前会话已停止' }
         const scopedSkills = agent.ctx.get('skills') as SkillsLike | undefined
         if (scopedSkills === undefined) return { ok: false, error: '当前会话的 skills 服务不可用' }
         const registrations = ownedBy(agent)
         const existing = (await skills.list({ scope: agent as unknown, cwd: agent.session.header.cwd })).some((s) => s.name === name)
+        if (!active || agentOf(sessionId) !== agent || owned.get(agent) !== registrations) {
+          return { ok: false, error: '插件或当前会话已停止' }
+        }
         if (existing && !registrations.has(name)) return { ok: false, error: `同名技能 "${name}" 已存在` }
         const current = registrations.get(name)
         if (current !== undefined) {
@@ -806,6 +812,7 @@ export function apply(ctx: Context): void {
       const agent = agentOf(sessionId)
       if (agent === undefined) return { ok: false, error: '当前会话没有活跃的 agent' }
       return enqueueTemporary(agent, async () => {
+        if (!active || agentOf(sessionId) !== agent) return { ok: false, error: '插件或当前会话已停止' }
         const registrations = owned.get(agent)
         const dispose = registrations?.get(args.name)
         if (dispose === undefined) return { ok: false, error: '该技能不是本会话注册的临时技能' }

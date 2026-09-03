@@ -148,6 +148,60 @@ exec /bin/mv "$@"
       expect(existsSync(moveMarker)).toBe(false)
     } finally { rmSync(base, { recursive: true, force: true }) }
   })
+
+  it.skipIf(process.platform === 'win32')('follows a symlinked destination parent for the device check', () => {
+    const base = mkdtempSync(join(tmpdir(), 'sm-move-'))
+    try {
+      const source = join(base, 'source')
+      const destinationTarget = join(base, 'destination-target')
+      const destinationParent = join(base, 'destination-parent')
+      const destination = join(destinationParent, 'destination')
+      const fakeBin = join(base, 'bin')
+      const fakeStat = join(fakeBin, 'stat')
+      const fakeMv = join(fakeBin, 'mv')
+      const moveMarker = join(base, 'move-called')
+      mkdirSync(fakeBin)
+      mkdirSync(destinationTarget)
+      symlinkSync(destinationTarget, destinationParent, 'dir')
+      writeFileSync(source, 'source')
+      writeFileSync(fakeStat, `#!/bin/sh
+last=''
+follow=0
+for arg in "$@"; do
+  last="$arg"
+  if [ "$arg" = '-L' ]; then follow=1; fi
+done
+if [ "$last" = "$SOURCE_PATH" ]; then echo '1:100'; exit 0; fi
+if [ "$last" = "$DESTINATION_PARENT" ]; then
+  if [ "$follow" = '1' ]; then echo '2:200'; else echo '1:150'; fi
+  exit 0
+fi
+exit 1
+`)
+      writeFileSync(fakeMv, `#!/bin/sh
+: > "$MOVE_MARKER"
+cp "$1" "$2"
+rm "$1"
+`)
+      chmodSync(fakeStat, 0o755)
+      chmodSync(fakeMv, 0o755)
+
+      const result = spawnSync('/bin/sh', ['-c', moveNoClobberCommand(source, destination, false)], {
+        env: {
+          ...process.env,
+          PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+          SOURCE_PATH: source,
+          DESTINATION_PARENT: destinationParent,
+          MOVE_MARKER: moveMarker,
+        },
+      })
+
+      expect(result.status).not.toBe(0)
+      expect(readFileSync(source, 'utf8')).toBe('source')
+      expect(existsSync(destination)).toBe(false)
+      expect(existsSync(moveMarker)).toBe(false)
+    } finally { rmSync(base, { recursive: true, force: true }) }
+  })
 })
 
 describe('realpathWithin (symlink-aware path guard)', () => {

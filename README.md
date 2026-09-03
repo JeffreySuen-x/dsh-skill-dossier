@@ -62,5 +62,6 @@ Windows / Linux / macOS。文件操作（停用/重装/删除）按平台生成 
 - 插件硬依赖 `webServer` 服务，**仅 web profile**（headless 装不了）。
 - 停用/重装/删除在 Windows 上已做代码级跨平台处理，但未在真机验证；见 `output/windows-verification-checklist.md`（仓库外）。
 - 停用/重装要求技能条目与其 trash 目录位于同一文件系统；若 skill root 本身是独立挂载点，插件会在改动文件前安全拒绝，不执行非原子的 copy-delete。
+- Windows 上的单文件 skill 使用同卷硬链接实现无覆盖移动；单文件符号链接会被安全拒绝，避免改变链接语义。
 - 调用统计是「尽力而为」的观察数据：埋点写入失败会被静默丢弃（不打断技能本身），且只统计本插件运行期间发生的调用，历史调用无法回溯补记。
 - 有效性评测（skill_eval）只负责「触发 + 记录结论」，实际的「带 vs 不带」对比评测由 `darwin-skill` 在对话框外完成，本插件不内置评测器。

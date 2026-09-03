@@ -48,7 +48,7 @@ describe('pwsh 命令生成（isWindows=true）', () => {
   })
 
   it('move 用 .NET 精确目标 API，不把已有目标当容器', () => {
-    expect(moveNoClobberCommand('C:\\s[r]c', 'C:\\d[s]t', true)).toBe("if ([System.IO.Directory]::Exists('C:\\s[r]c')) { [System.IO.Directory]::Move('C:\\s[r]c', 'C:\\d[s]t') } elseif ([System.IO.File]::Exists('C:\\s[r]c')) { [System.IO.File]::Move('C:\\s[r]c', 'C:\\d[s]t') } else { throw 'source missing' }")
+    expect(moveNoClobberCommand('C:\\s[r]c', 'C:\\d[s]t', true)).toBe("if ([System.IO.Directory]::Exists('C:\\s[r]c')) { [System.IO.Directory]::Move('C:\\s[r]c', 'C:\\d[s]t') } elseif ([System.IO.File]::Exists('C:\\s[r]c')) { if (([System.IO.File]::GetAttributes('C:\\s[r]c') -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'file links are not supported' }; [System.IO.File]::CreateHardLink('C:\\d[s]t', 'C:\\s[r]c') | Out-Null; try { [System.IO.File]::Delete('C:\\s[r]c') } catch { [System.IO.File]::Delete('C:\\d[s]t'); throw } } else { throw 'source missing' }")
   })
 
   it('remove 用 LiteralPath', () => {

@@ -61,22 +61,28 @@ export function mkdirCommand(dir: string, isWindows: boolean): string {
     : `mkdir -p ${quoteShellArg(dir, isWindows)}`
 }
 
-function posixIdentityCommand(target: string): string {
+function posixIdentityCommand(target: string, followSymlink = false): string {
   const value = quoteShellArg(target, false)
-  return `stat -c '%d:%i' -- ${value} 2>/dev/null || stat -f '%d:%i' -- ${value} 2>/dev/null`
+  const dereference = followSymlink ? '-L ' : ''
+  return `stat ${dereference}-c '%d:%i' -- ${value} 2>/dev/null || stat ${dereference}-f '%d:%i' -- ${value} 2>/dev/null`
 }
 
 export function moveNoClobberCommand(src: string, dst: string, isWindows: boolean): string {
   const source = quoteShellArg(src, isWindows)
   const destination = quoteShellArg(dst, isWindows)
   if (isWindows) {
-    return `if ([System.IO.Directory]::Exists(${source})) { [System.IO.Directory]::Move(${source}, ${destination}) } elseif ([System.IO.File]::Exists(${source})) { [System.IO.File]::Move(${source}, ${destination}) } else { throw 'source missing' }`
+    return `if ([System.IO.Directory]::Exists(${source})) { [System.IO.Directory]::Move(${source}, ${destination}) } `
+      + `elseif ([System.IO.File]::Exists(${source})) { `
+      + `if (([System.IO.File]::GetAttributes(${source}) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'file links are not supported' }; `
+      + `[System.IO.File]::CreateHardLink(${destination}, ${source}) | Out-Null; `
+      + `try { [System.IO.File]::Delete(${source}) } catch { [System.IO.File]::Delete(${destination}); throw } `
+      + `} else { throw 'source missing' }`
   }
   const nestedPath = path.posix.join(dst, path.posix.basename(src))
   const destinationParentPath = path.posix.dirname(dst)
   const nested = quoteShellArg(nestedPath, false)
   const sourceIdentity = posixIdentityCommand(src)
-  const destinationParentIdentity = posixIdentityCommand(destinationParentPath)
+  const destinationParentIdentity = posixIdentityCommand(destinationParentPath, true)
   const destinationIdentity = posixIdentityCommand(dst)
   const nestedIdentity = posixIdentityCommand(nestedPath)
   // trash 与 skill root 预期同盘；跨设备 mv 会 copy+unlink 并改变 inode，

@@ -19,6 +19,24 @@ function expectSuccess(result: SpawnSyncReturns<string>): void {
   }
 }
 
+function createTempOnAnotherVolume(excludedPath: string): string | undefined {
+  const result = runPowerShell(
+    '[System.IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady } | '
+      + 'ForEach-Object { $_.RootDirectory.FullName }',
+  )
+  if (result.status !== 0) return undefined
+  const excludedRoot = parse(excludedPath).root.toLowerCase()
+  for (const root of result.stdout.split(/\r?\n/u).map((value) => value.trim()).filter(Boolean)) {
+    if (parse(root).root.toLowerCase() === excludedRoot) continue
+    try {
+      return mkdtempSync(join(root, 'dsh-skill-manager-volume-'))
+    } catch {
+      // A mounted volume can be ready but not writable by the runner account.
+    }
+  }
+  return undefined
+}
+
 describe.runIf(process.platform === 'win32')('Windows lifecycle runtime', () => {
   let base: string
 
@@ -27,12 +45,13 @@ describe.runIf(process.platform === 'win32')('Windows lifecycle runtime', () => 
   })
 
   afterEach(() => {
+    spawnSync('attrib.exe', ['-R', join(base, '*'), '/S', '/D'], { encoding: 'utf8' })
     rmSync(base, { recursive: true, force: true })
   })
 
   it('moves a special-character directory forward and back', () => {
-    const source = join(base, 'skill[a]')
-    const destination = join(base, 'trash[b]')
+    const source = join(base, "skill[a]'quoted")
+    const destination = join(base, "trash[b]'quoted")
     mkdirSync(source)
     writeFileSync(join(source, 'SKILL.md'), '# alpha')
 
@@ -98,12 +117,9 @@ describe.runIf(process.platform === 'win32')('Windows lifecycle runtime', () => 
     expect(existsSync(destination)).toBe(false)
   })
 
-  it('rejects a cross-volume file move when a second writable volume is available', () => {
-    const temporaryRoot = parse(base).root.toLowerCase()
-    const workspaceRoot = parse(process.cwd()).root.toLowerCase()
-    if (temporaryRoot === workspaceRoot) return
-
-    const workspaceTemp = mkdtempSync(join(process.cwd(), '.dsh-skill-manager-volume-'))
+  it('rejects a cross-volume file move when a second writable volume is available', ({ skip }) => {
+    const workspaceTemp = createTempOnAnotherVolume(base)
+    if (workspaceTemp === undefined) skip('no second writable Windows volume is available')
     try {
       const source = join(base, 'source[volume].md')
       const destination = join(workspaceTemp, 'destination[volume].md')

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { Readable } from 'node:stream'
 import { describe, expect, it } from 'vitest'
 import { apply, inject } from '../src/index.ts'
@@ -39,7 +39,7 @@ function hostContext(options: {
   const services = new Map<string, unknown>()
   const today = currentDateKey()
   const shellCommands: string[] = []
-  const cwd = options.cwd ?? '/workspace'
+  const cwd = options.cwd ?? (process.platform === 'win32' ? 'C:\\workspace' : '/workspace')
 
   services.set('skills', {
     list: async () => options.skill === undefined ? [] : [options.skill],
@@ -60,10 +60,12 @@ function hostContext(options: {
       : undefined,
   })
   services.set('fs', {
-    resolve: async (path: string, options?: { cwd?: string }) => `${options?.cwd ?? ''}/${path}`,
+    resolve: async (path: string, options?: { cwd?: string }) => isAbsolute(path)
+      ? path
+      : join(options?.cwd ?? '', path),
     listDir: options.listDir ?? (async () => [{ name: `${today}.md` }]),
     readText: async (target: unknown) => {
-      if (String(target).endsWith('/.dsh/skill-manager/index.json')) {
+      if (String(target).replaceAll('\\', '/').endsWith('/.dsh/skill-manager/index.json')) {
         if (options.indexReadError !== undefined) throw options.indexReadError
         if (options.indexText === undefined) throw Object.assign(new Error('missing'), { code: 'ENOENT' })
         return options.indexText

@@ -49,7 +49,7 @@ export interface ReportDependencies {
     agents: ReportAgentsLike;
     fs: ReportFsLike;
     sandboxPolicy: ReportSandboxPolicyLike;
-    ensureDirectories(cwd: string): Promise<void>;
+    ensureDirectories(cwd: string, sessionId: string): Promise<void>;
 }
 /** Parse the brief skill's stable markdown contract. */
 export declare function parseBrief(text: string): ReportProject[];

@@ -9,6 +9,7 @@ import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent
 import type { SkillManagerInjected, ThemeScheme } from './index.ts'
 import { DIRECTION_LABELS } from '../directions.ts'
 import css from './Panel.module.css'
+import { reportFailureMessage } from './report-state.ts'
 
 const NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const FS_SOURCES = ['project-dsh', 'project-agents', 'user-dsh', 'user-agents', 'custom']
@@ -664,7 +665,7 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
     )
   }
 
-  // ---------- 汇报（调用 dsh-report 后端 /api/report） ----------
+  // ---------- 汇报（调用本包内聚的 report host /api/report） ----------
 
   const reportRpc = async <T,>(method: string, args?: unknown): Promise<T> => {
     const res = await fetch('/api/report', {
@@ -692,8 +693,9 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
     const method = view === 'monthly' ? 'generateMonthly' : 'generateDaily'
     reportRpc<ReportData>(method, { sessionId })
       .then((data) => {
-        if (typeof data.lastError === 'string' && data.lastError !== '') {
-          setReportError(data.lastError)
+        const failure = reportFailureMessage(data)
+        if (failure !== '') {
+          setReportError(failure)
           setReportData(null)
         } else {
           setReportData(data)

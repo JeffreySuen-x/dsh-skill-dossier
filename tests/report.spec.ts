@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { reportFailureMessage } from '../src/client/report-state.ts'
 import { parseBrief, pickDailyDate, pickMonth, toMarkdown } from '../src/report.ts'
 
 describe('brief report contract', () => {
@@ -47,5 +48,22 @@ describe('brief report contract', () => {
     expect(markdown).toContain('完成单包汇报')
     expect(markdown).toContain('Windows 待验证')
     expect(markdown).not.toContain('progressTotal')
+  })
+
+  it('escapes markdown table delimiters and line breaks in brief content', () => {
+    const markdown = toMarkdown({
+      month: '2026-09',
+      days: [{ date: '2026-09-03', projects: ['A | B'], progress: ['第一行\n第二行'], todo: [], issues: [] }],
+      projects: [],
+    }, 'monthly')
+
+    expect(markdown).toContain('A \\| B')
+    expect(markdown).toContain('第一行<br>第二行')
+  })
+
+  it('surfaces structured report failures to the client state', () => {
+    expect(reportFailureMessage({ lastError: '简报读取失败' })).toBe('简报读取失败')
+    expect(reportFailureMessage({ lastError: '' })).toBe('')
+    expect(reportFailureMessage({})).toBe('')
   })
 })

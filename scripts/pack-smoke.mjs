@@ -4,18 +4,24 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 const scratch = mkdtempSync(join(tmpdir(), 'dsh-skill-manager-pack-'))
 
+function runNpm(args, options = {}) {
+  if (process.platform === 'win32') {
+    return execFileSync(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', 'npm.cmd', ...args], options)
+  }
+  return execFileSync('npm', args, options)
+}
+
 try {
-  const packOutput = execFileSync(npm, [
+  const packOutput = runNpm([
     'pack', '--json', '--pack-destination', scratch, '--cache', join(scratch, 'npm-cache'),
   ], { cwd: new URL('..', import.meta.url), encoding: 'utf8' })
   const packed = JSON.parse(packOutput)[0]
   if (packed?.filename === undefined) throw new Error('npm pack did not return a tarball filename')
   const tarball = join(scratch, packed.filename)
   const installRoot = join(scratch, 'install')
-  execFileSync(npm, [
+  runNpm([
     'install', '--prefix', installRoot, '--ignore-scripts', '--no-audit', '--no-fund', '--legacy-peer-deps',
     '--cache', join(scratch, 'npm-cache'), tarball,
   ], { stdio: 'pipe' })

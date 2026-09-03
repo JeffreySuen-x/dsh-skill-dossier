@@ -51,7 +51,7 @@ export interface ReportDependencies {
   agents: ReportAgentsLike
   fs: ReportFsLike
   sandboxPolicy: ReportSandboxPolicyLike
-  ensureDirectories(cwd: string): Promise<void>
+  ensureDirectories(cwd: string, sessionId: string): Promise<void>
 }
 
 /** Parse the brief skill's stable markdown contract. */
@@ -110,7 +110,7 @@ export function toMarkdown(data: any, view: 'daily' | 'monthly'): string {
     lines.push(`# 月度归纳 ${String(data.month ?? '')}`, '', '## 按日栏式', '')
     lines.push('| 日期 | 项目 | 进度 | 待办 | 问题 |', '|---|---|---|---|---|')
     for (const day of data.days ?? []) {
-      lines.push(`| ${String(day.date ?? '')} | ${(day.projects ?? []).join('、')} | ${(day.progress ?? []).join('；')} | ${(day.todo ?? []).join('；')} | ${(day.issues ?? []).join('；')} |`)
+      lines.push(`| ${tableCell(day.date)} | ${tableCell((day.projects ?? []).join('、'))} | ${tableCell((day.progress ?? []).join('；'))} | ${tableCell((day.todo ?? []).join('；'))} | ${tableCell((day.issues ?? []).join('；'))} |`)
     }
     lines.push('', '## 跨日项目汇总')
     for (const project of data.projects ?? []) {
@@ -136,6 +136,10 @@ export function toMarkdown(data: any, view: 'daily' | 'monthly'): string {
     }
   }
   return lines.join('\n')
+}
+
+function tableCell(value: unknown): string {
+  return String(value ?? '').replaceAll('|', '\\|').replace(/\r?\n/g, '<br>')
 }
 
 function appendItems(lines: string[], label: string, values: string[] | undefined, empty: string, prefix = '- '): void {
@@ -267,7 +271,7 @@ export function registerReportApi(ctx: EffectContextLike, deps: ReportDependenci
     if (cwd === '' || typeof sessionId !== 'string') return { ok: false, error: '无法确定工作区目录' }
     const agent = agents.get(sessionId)
     if (agent === undefined) return { ok: false, error: '找不到对应 agent（会话可能已结束）' }
-    await ensureDirectories(cwd)
+    await ensureDirectories(cwd, sessionId)
     const date = localDateKey()
     const prompt = [
       '【复盘任务】请对 reporter/brief/ 下所有简报做一次整合复盘：',
@@ -293,7 +297,9 @@ export function registerReportApi(ctx: EffectContextLike, deps: ReportDependenci
   async function exportReport(args: any) {
     const cwd = cwdOf(args?.sessionId)
     if (cwd === '') return { ok: false, error: '无法确定工作区目录' }
-    await ensureDirectories(cwd)
+    const sessionId = typeof args?.sessionId === 'string' ? args.sessionId : ''
+    if (sessionId === '') return { ok: false, error: '无法确定工作区目录' }
+    await ensureDirectories(cwd, sessionId)
     const view: 'daily' | 'monthly' = args?.view === 'monthly' ? 'monthly' : 'daily'
     const data: any = view === 'monthly' ? await generateMonthly(args) : await generateDaily(args)
     if (typeof data.lastError === 'string' && data.lastError !== '') return { ok: false, error: data.lastError }

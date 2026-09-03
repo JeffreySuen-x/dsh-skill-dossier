@@ -216,10 +216,12 @@ export function apply(ctx: Context): void {
     }
   }
 
-  async function runShell(command: string, targetPath: string): Promise<void> {
+  async function runShell(command: string, targetPath: string, policyOverride?: unknown): Promise<void> {
     if (shell === undefined) throw new Error('shell 服务不可用')
     const request: { command: string; sandboxPolicy?: unknown } = { command }
-    if (sandboxPolicy !== undefined) {
+    if (policyOverride !== undefined) {
+      request.sandboxPolicy = policyOverride
+    } else if (sandboxPolicy !== undefined) {
       const ws = sandboxPolicy.workspaceRoot
       const mode = ws !== undefined && isWithin(targetPath, ws) ? 'workspace-write' : 'danger-full-access'
       request.sandboxPolicy = sandboxPolicy.resolve({ mode })
@@ -938,10 +940,13 @@ export function apply(ctx: Context): void {
       agents: agents as unknown as ReportAgentsLike,
       fs: fs as unknown as ReportFsLike,
       sandboxPolicy: sandboxPolicy as unknown as ReportSandboxPolicyLike,
-      ensureDirectories: async (cwd) => {
+      ensureDirectories: async (cwd, sessionId) => {
+        const agent = agents.get(sessionId)
+        if (agent === undefined) throw new Error('找不到对应 agent（会话可能已结束）')
+        const policy = sandboxPolicy.resolve({ session: agent.session })
         for (const dir of ['brief', 'Review', 'export']) {
           const target = join(cwd, 'reporter', dir)
-          await runShell(mkdirCommand(target, IS_WINDOWS), target)
+          await runShell(mkdirCommand(target, IS_WINDOWS), target, policy)
         }
       },
     })

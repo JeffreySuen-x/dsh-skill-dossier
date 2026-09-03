@@ -8,9 +8,19 @@ interface Route {
   handler: (req: any, res: any) => unknown
 }
 
-function hostContext(options: { listDir?: () => Promise<Array<{ name?: string; path?: string }>> } = {}) {
+function currentDateKey(): string {
+  const date = new Date()
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
+
+function hostContext(options: {
+  listDir?: () => Promise<Array<{ name?: string; path?: string }>>
+  writeText?: (target: unknown, content: string) => Promise<void>
+  followup?: (message: unknown) => void
+} = {}) {
   const routes = new Map<string, Route>()
   const services = new Map<string, unknown>()
+  const today = currentDateKey()
 
   services.set('skills', {
     list: async () => [],
@@ -27,14 +37,14 @@ function hostContext(options: { listDir?: () => Promise<Array<{ name?: string; p
   })
   services.set('agents', {
     get: (id: string) => id === 'session-1'
-      ? { session: { header: { cwd: '/workspace' } }, followup: () => undefined }
+      ? { session: { header: { cwd: '/workspace' } }, followup: options.followup ?? (() => undefined) }
       : undefined,
   })
   services.set('fs', {
     resolve: async (path: string, options?: { cwd?: string }) => `${options?.cwd ?? ''}/${path}`,
-    listDir: options.listDir ?? (async () => [{ name: '2026-09-03.md' }]),
-    readText: async () => '---\ndate: 2026-09-03\n---\n\n# Brief\n\n## 管理插件\n- 作用：管理技能\n- 实现：host + client\n- 今日进度：\n  1. 单包汇报\n- 待办：\n- 问题：\n',
-    writeText: async () => undefined,
+    listDir: options.listDir ?? (async () => [{ name: `${today}.md` }]),
+    readText: async () => `---\ndate: ${today}\n---\n\n# Brief\n\n## 管理插件\n- 作用：管理技能\n- 实现：host + client\n- 今日进度：\n  1. 单包汇报\n- 待办：\n- 问题：\n`,
+    writeText: options.writeText ?? (async () => undefined),
   })
   services.set('shell', { resolve: (request: unknown) => request, run: async () => ({ exitCode: 0 }) })
   services.set('sandboxPolicy', { workspaceRoot: '/workspace', resolve: () => ({}) })
@@ -102,6 +112,37 @@ describe('single-package host activation', () => {
     )
 
     expect(crossSite).toEqual({ status: 403, body: { error: '跨站请求被拒绝' } })
+  })
+
+  it('generates monthly data, exports both formats, and reviews the actual brief contract', async () => {
+    const writes: Array<{ target: string; content: string }> = []
+    const followups: unknown[] = []
+    const { ctx, routes } = hostContext({
+      writeText: async (target, content) => { writes.push({ target: String(target), content }) },
+      followup: (message) => { followups.push(message) },
+    })
+    apply(ctx as never)
+    const route = routes.get('/api/report')!
+
+    const monthly = await post(route, { method: 'generateMonthly', args: { sessionId: 'session-1' } })
+    expect(monthly.status).toBe(200)
+    expect(monthly.body.lastError).toBe('')
+    expect(monthly.body.projects).toEqual([
+      expect.objectContaining({ name: '管理插件', progress: ['单包汇报'] }),
+    ])
+
+    const exported = await post(route, { method: 'export', args: { sessionId: 'session-1', view: 'monthly' } })
+    expect(exported.body).toEqual(expect.objectContaining({ ok: true }))
+    expect(writes.map((write) => write.target).sort()).toEqual([
+      expect.stringMatching(/report-monthly-\d{4}-\d{2}\.json$/),
+      expect.stringMatching(/report-monthly-\d{4}-\d{2}\.md$/),
+    ])
+    expect(writes.some((write) => write.content.includes('单包汇报'))).toBe(true)
+
+    const reviewed = await post(route, { method: 'review', args: { sessionId: 'session-1' } })
+    expect(reviewed.body).toEqual(expect.objectContaining({ ok: true }))
+    expect(JSON.stringify(followups)).toContain('reporter/brief/ 目录下所有 YYYY-MM-DD.md')
+    expect(JSON.stringify(followups)).not.toContain('brief-YYYY-MM-DD.md')
   })
 
   it('treats a missing brief directory as an empty first-run report', async () => {

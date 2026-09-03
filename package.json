@@ -2,6 +2,7 @@
   "name": "dsh-skill-manager",
   "description": "DSH skill lifecycle and work-report plugin: catalog, routing, usage, lifecycle actions, plus daily/monthly/review/export reports from reporter/brief. Cross-platform design for Windows/Linux/macOS.",
   "version": "0.1.0",
+  "packageManager": "pnpm@11.7.0",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
@@ -33,7 +34,8 @@
     "build": "tsc -p tsconfig.json && tsdown",
     "pack:smoke": "node scripts/pack-smoke.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:windows-smoke": "vitest run tests/windows-runtime.spec.ts"
   },
   "license": "MIT",
   "peerDependencies": {

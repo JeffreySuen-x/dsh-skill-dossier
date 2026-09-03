@@ -102,9 +102,30 @@ async function post(route: Route, body: unknown, headers: Record<string, string>
   return { status: response.statusCode, body: JSON.parse(responseBody) as any }
 }
 
-function runPosixCommand(request: any): { exitCode: number; stderr: { text: string } } {
-  const result = spawnSync('/bin/sh', ['-c', String(request?.command ?? '')], { encoding: 'utf8' })
+function runNativeCommand(request: any): { exitCode: number; stderr: { text: string } } {
+  const command = String(request?.command ?? '')
+  const result = process.platform === 'win32'
+    ? spawnSync('pwsh.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], { encoding: 'utf8' })
+    : spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8' })
   return { exitCode: result.status ?? 1, stderr: { text: result.stderr } }
+}
+
+function isAtomicReplace(command: string): boolean {
+  return process.platform === 'win32'
+    ? command.startsWith('[System.IO.File]::Move(')
+    : command.startsWith('mv -f -- ')
+}
+
+function isTemporaryFileCleanup(command: string): boolean {
+  return process.platform === 'win32'
+    ? command.startsWith('Remove-Item -Force -LiteralPath ')
+    : command.startsWith('rm -f -- ')
+}
+
+function isLifecycleMove(command: string): boolean {
+  return process.platform === 'win32'
+    ? command.includes('[DshSkillManagerNativeMove]::MoveFileEx(')
+    : command.includes('mv -n -- ')
 }
 
 describe('single-package host activation', () => {
@@ -180,16 +201,16 @@ describe('single-package host activation', () => {
 
     expect(response).toEqual({ status: 200, body: { ok: true } })
     expect(writes).toHaveLength(1)
-    expect(writes[0]).toMatch(/\/\.dsh\/skill-manager\/\.index\.json\..+\.tmp$/)
-    expect(shellCommands.some((command) => command.startsWith('mv -f -- '))).toBe(true)
-    expect(shellCommands.some((command) => command.endsWith("'/workspace/.dsh/skill-manager/index.json'"))).toBe(true)
+    expect(writes[0].replaceAll('\\', '/')).toMatch(/\/\.dsh\/skill-manager\/\.index\.json\..+\.tmp$/)
+    expect(shellCommands.some(isAtomicReplace)).toBe(true)
+    expect(shellCommands.some((command) => command.replaceAll('\\', '/').includes('/.dsh/skill-manager/index.json'))).toBe(true)
   })
 
   it('reports atomic replacement failure and attempts to clean the temporary file', async () => {
     const writes: string[] = []
     const { ctx, routes, shellCommands } = hostContext({
       writeText: async (target) => { writes.push(String(target)) },
-      shellRun: async (request) => String(request?.command ?? '').startsWith('mv -f -- ')
+      shellRun: async (request) => isAtomicReplace(String(request?.command ?? ''))
         ? { exitCode: 1, stderr: { text: 'replace failed' } }
         : { exitCode: 0 },
     })
@@ -203,7 +224,7 @@ describe('single-package host activation', () => {
     expect(response.status).toBe(500)
     expect(response.body.error).toContain('replace failed')
     expect(writes).toHaveLength(1)
-    expect(shellCommands.some((command) => command.startsWith('rm -f -- '))).toBe(true)
+    expect(shellCommands.some(isTemporaryFileCleanup)).toBe(true)
   })
 
   it('attempts temporary-file cleanup when staging the new index fails', async () => {
@@ -219,7 +240,7 @@ describe('single-package host activation', () => {
 
     expect(response.status).toBe(500)
     expect(response.body.error).toContain('stage failed')
-    expect(shellCommands.some((command) => command.startsWith('rm -f -- '))).toBe(true)
+    expect(shellCommands.some(isTemporaryFileCleanup)).toBe(true)
   })
 
   it('does not create or rewrite the index for a rejected lifecycle operation', async () => {
@@ -238,7 +259,7 @@ describe('single-package host activation', () => {
     expect(writes).toEqual([])
   })
 
-  it.skipIf(process.platform === 'win32')('moves an uninstalled skill back when the index commit fails', async () => {
+  it('moves an uninstalled skill back when the index commit fails', async () => {
     const base = mkdtempSync(join(tmpdir(), 'dsh-skill-manager-uninstall-'))
     const skillDir = join(base, 'skills', 'alpha')
     const skillPath = join(skillDir, 'SKILL.md')
@@ -256,9 +277,9 @@ describe('single-package host activation', () => {
           content: '# alpha',
           path: skillPath,
         },
-        shellRun: async (request) => String(request?.command ?? '').startsWith('mv -f -- ')
+        shellRun: async (request) => isAtomicReplace(String(request?.command ?? ''))
           ? { exitCode: 1, stderr: { text: 'commit failed' } }
-          : runPosixCommand(request),
+          : runNativeCommand(request),
       })
       apply(ctx as never)
 
@@ -267,7 +288,7 @@ describe('single-package host activation', () => {
         args: { sessionId: 'session-1', name: 'alpha' },
       })
 
-      const moves = shellCommands.filter((command) => command.includes('mv -n -- '))
+      const moves = shellCommands.filter(isLifecycleMove)
       expect(response.status).toBe(500)
       expect(response.body.error).toContain('commit failed')
       expect(moves).toHaveLength(2)
@@ -277,7 +298,7 @@ describe('single-package host activation', () => {
     }
   })
 
-  it.skipIf(process.platform === 'win32')('moves a reinstalled skill back to trash when the index commit fails', async () => {
+  it('moves a reinstalled skill back to trash when the index commit fails', async () => {
     const base = mkdtempSync(join(tmpdir(), 'dsh-skill-manager-reinstall-'))
     const root = join(base, 'skills')
     const trashDir = join(base, 'skill-manager', 'trash')
@@ -295,9 +316,9 @@ describe('single-package host activation', () => {
           usage: {},
           trash: { alpha: { name: 'alpha', originalPath, trashedPath, root, removedAt: 1 } },
         }),
-        shellRun: async (request) => String(request?.command ?? '').startsWith('mv -f -- ')
+        shellRun: async (request) => isAtomicReplace(String(request?.command ?? ''))
           ? { exitCode: 1, stderr: { text: 'commit failed' } }
-          : runPosixCommand(request),
+          : runNativeCommand(request),
       })
       apply(ctx as never)
 
@@ -306,12 +327,14 @@ describe('single-package host activation', () => {
         args: { sessionId: 'session-1', name: 'alpha' },
       })
 
-      const moves = shellCommands.filter((command) => command.includes('mv -n -- '))
+      const moves = shellCommands.filter(isLifecycleMove)
       expect(response.status).toBe(500)
       expect(response.body.error).toContain('commit failed')
       expect(moves).toHaveLength(2)
-      expect(moves[0]).toContain(`mv -n -- '${trashedPath}' '${originalPath}'`)
-      expect(moves[1]).toContain(`mv -n -- '${originalPath}' '${trashedPath}'`)
+      expect(moves[0]).toContain(trashedPath)
+      expect(moves[0]).toContain(originalPath)
+      expect(moves[1]).toContain(originalPath)
+      expect(moves[1]).toContain(trashedPath)
       expect(existsSync(originalPath)).toBe(false)
       expect(readFileSync(join(trashedPath, 'SKILL.md'), 'utf8')).toBe('# alpha')
     } finally {
@@ -333,8 +356,8 @@ describe('single-package host activation', () => {
       },
       shellRun: async (request) => {
         const command = String(request?.command ?? '')
-        if (command.startsWith('mv -f -- ')) return { exitCode: 1, stderr: { text: 'commit failed' } }
-        if (command.includes('mv -n -- ')) {
+        if (isAtomicReplace(command)) return { exitCode: 1, stderr: { text: 'commit failed' } }
+        if (isLifecycleMove(command)) {
           lifecycleMoves += 1
           if (lifecycleMoves === 2) return { exitCode: 1, stderr: { text: 'rollback failed' } }
         }

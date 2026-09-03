@@ -38,6 +38,8 @@ pnpm run pack:smoke # tarball 临时安装并验证两个 API 路由
 
 改完 `src/` 后运行 `pnpm run build` 并提交 `lib/`，即可保证仓库始终自洽（不会出现「改了 src 但 lib 没更新」的隐患）。
 
+GitHub Actions 在 Ubuntu / macOS / Windows 上分别使用 Node 22 和 24 运行 test/typecheck/build/pack 四闸，并在 Windows runner 额外运行 `pnpm run test:windows-smoke`，真实调用 PowerShell + `MoveFileExW` 验证生命周期移动。
+
 ## 从旧的双包配置迁移
 
 早期版本把 `/api/report` 放在独立的 `@deepseek-ai/dsh-report` 包，并要求 profile 手工 link/insert。当前版本已将汇报后端并入本包。升级并重启 DSH 前，应从 profile dependencies 与 `cordis.patch.yml` 中移除旧 report 包和 `insert report` 行，避免 `/api/report` 重复注册；`reporter/brief/`、`reporter/Review/` 与 `reporter/export/` 数据目录无需迁移。
@@ -60,7 +62,7 @@ Windows / Linux / macOS。文件操作（停用/重装/删除）按平台生成 
 ## 已知边界
 
 - 插件硬依赖 `webServer` 服务，**仅 web profile**（headless 装不了）。
-- 停用/重装/删除在 Windows 上已做代码级跨平台处理，但未在真机验证；见 `output/windows-verification-checklist.md`（仓库外）。
+- Windows 原生回归已写入 CI，但在首次推送并获得 GitHub Actions 绿灯前，仍只能视为「已配置」，不是「已实跑通过」。
 - 停用/重装要求技能条目与其 trash 目录位于同一文件系统；若 skill root 本身是独立挂载点，插件会在改动文件前安全拒绝，不执行非原子的 copy-delete。
 - Windows 生命周期移动使用原生 `MoveFileExW` 且 flags 为 0：不覆盖已有目标，也不允许跨卷 copy-delete。
 - 调用统计是「尽力而为」的观察数据：埋点写入失败会被静默丢弃（不打断技能本身），且只统计本插件运行期间发生的调用，历史调用无法回溯补记。

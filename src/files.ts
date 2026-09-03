@@ -71,12 +71,15 @@ export function moveNoClobberCommand(src: string, dst: string, isWindows: boolea
   const source = quoteShellArg(src, isWindows)
   const destination = quoteShellArg(dst, isWindows)
   if (isWindows) {
-    return `if ([System.IO.Directory]::Exists(${source})) { [System.IO.Directory]::Move(${source}, ${destination}) } `
-      + `elseif ([System.IO.File]::Exists(${source})) { `
-      + `if (([System.IO.File]::GetAttributes(${source}) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'file links are not supported' }; `
-      + `[System.IO.File]::CreateHardLink(${destination}, ${source}) | Out-Null; `
-      + `try { [System.IO.File]::Delete(${source}) } catch { [System.IO.File]::Delete(${destination}); throw } `
-      + `} else { throw 'source missing' }`
+    const typeDefinition = 'using System; using System.Runtime.InteropServices; '
+      + 'public static class DshSkillManagerNativeMove { '
+      + '[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] '
+      + '[return: MarshalAs(UnmanagedType.Bool)] '
+      + 'public static extern bool MoveFileEx(string existingName, string newName, uint flags); }'
+    return `if (-not ('DshSkillManagerNativeMove' -as [type])) { Add-Type -TypeDefinition ${quoteShellArg(typeDefinition, true)} }; `
+      + `if (-not ([DshSkillManagerNativeMove]::MoveFileEx(${source}, ${destination}, 0))) { `
+      + `$nativeError = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error(); `
+      + `throw [System.ComponentModel.Win32Exception]::new($nativeError) }`
   }
   const nestedPath = path.posix.join(dst, path.posix.basename(src))
   const destinationParentPath = path.posix.dirname(dst)

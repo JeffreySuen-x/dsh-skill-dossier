@@ -47,8 +47,13 @@ describe('pwsh 命令生成（isWindows=true）', () => {
     expect(mkdirCommand('C:\\a[b]', true)).toBe("[System.IO.Directory]::CreateDirectory('C:\\a[b]') | Out-Null")
   })
 
-  it('move 用 .NET 精确目标 API，不把已有目标当容器', () => {
-    expect(moveNoClobberCommand('C:\\s[r]c', 'C:\\d[s]t', true)).toBe("if ([System.IO.Directory]::Exists('C:\\s[r]c')) { [System.IO.Directory]::Move('C:\\s[r]c', 'C:\\d[s]t') } elseif ([System.IO.File]::Exists('C:\\s[r]c')) { if (([System.IO.File]::GetAttributes('C:\\s[r]c') -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'file links are not supported' }; [System.IO.File]::CreateHardLink('C:\\d[s]t', 'C:\\s[r]c') | Out-Null; try { [System.IO.File]::Delete('C:\\s[r]c') } catch { [System.IO.File]::Delete('C:\\d[s]t'); throw } } else { throw 'source missing' }")
+  it('move 用不覆盖、不跨卷复制的 Windows 原生 rename', () => {
+    const command = moveNoClobberCommand('C:\\s[r]c', 'C:\\d[s]t', true)
+    expect(command).toContain('DshSkillManagerNativeMove')
+    expect(command).toContain('[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]')
+    expect(command).toContain("::MoveFileEx('C:\\s[r]c', 'C:\\d[s]t', 0)")
+    expect(command).toContain('GetLastWin32Error()')
+    expect(command).not.toContain('CreateHardLink')
   })
 
   it('remove 用 LiteralPath', () => {

@@ -21,9 +21,10 @@ import type { Context } from '@deepseek-ai/cordis'
 import { formatMatches, matchSkills, type SkillMatch, type SkillProfile } from './match.ts'
 import { DIRECTION_LABELS, detectDirections, isDirectionLabel } from './directions.ts'
 import { formatReview, reviewCandidates } from './freshness.ts'
-import { formatUsage, recordUsage, skillGestures, type UsageRecord } from './usage.ts'
-import { fsEntryOf, isWithin, mkdirCommand, moveNoClobberCommand, removeRecursiveCommand, trashDirOf } from './files.ts'
+import { formatUsage, recordUsage, skillGestures } from './usage.ts'
+import { atomicReplaceCommand, fsEntryOf, isWithin, mkdirCommand, moveNoClobberCommand, removeRecursiveCommand, trashDirOf } from './files.ts'
 import { isCrossSiteRequest, readJsonBody, respondJson } from './http.ts'
+import { createIndexStore } from './index-store.ts'
 import { registerReportApi, type ReportAgentsLike, type ReportFsLike, type ReportSandboxPolicyLike, type ReportWebServerLike } from './report.ts'
 
 /** 与 base bundle 选择 bash/pwsh 的分支一致（process.platform === 'win32'）。 */
@@ -105,50 +106,15 @@ interface WebRouteLike {
 }
 interface WebServerLike { register(route: WebRouteLike): () => void }
 
-interface IndexEntry {
-  name: string
-  direction?: string
-  useScope?: string
-  boundaries?: string
-  scenarios?: string
-  notes?: string
-  origin?: 'self' | 'external' | 'system' | 'unknown'
-  updatedAt: number
-  /** 上次复审时间戳；与 contentHash 一起判断「内容变了但没复审」。 */
-  reviewedAt?: number
-  /** 建档时技能正文的哈希（sha256 前 16 位）。 */
-  contentHash?: string
-  /** 最近一次评测结论（由 darwin-skill 在对话框外产出后写回）。 */
-  evaluation?: {
-    score: number | null
-    judgedAt: number
-    baselineDelta: string | null
-    conclusion: '有效' | '无效' | '待评测'
-  }
-}
-interface TrashRecord {
-  name: string
-  originalPath: string
-  trashedPath: string
-  root: string
-  removedAt: number
-}
-interface ArchiveIndex {
-  version: number
-  skills: Record<string, IndexEntry>
-  trash: Record<string, TrashRecord>
-  usage: Record<string, UsageRecord>
-}
-
 export function apply(ctx: Context): void {
   const skills = ctx.get('skills') as SkillsLike | undefined
-  if (skills === undefined) return
   const agents = ctx.get('agents') as AgentsLike | undefined
   const fs = ctx.get('fs') as FsLike | undefined
   const shell = ctx.get('shell') as ShellLike | undefined
   const sandboxPolicy = ctx.get('sandboxPolicy') as SandboxPolicyLike | undefined
   const tools = ctx.get('tools') as ToolsLike | undefined
   const webServer = ctx.get('webServer') as WebServerLike | undefined
+  if (skills === undefined || agents === undefined || fs === undefined || shell === undefined || sandboxPolicy === undefined || tools === undefined || webServer === undefined) return
 
   const owned = new Map<string, () => void>()
   ctx.effect(() => () => {
@@ -157,15 +123,15 @@ export function apply(ctx: Context): void {
   })
 
   function viewOptions(sessionId: unknown) {
-    if (agents === undefined || typeof sessionId !== 'string') return {}
-    const agent = agents.get(sessionId)
+    if (typeof sessionId !== 'string') return {}
+    const agent = agents!.get(sessionId)
     if (agent === undefined) return {}
     return { scope: agent as unknown, cwd: agent.session.header.cwd }
   }
 
   function agentOf(sessionId: unknown): AgentLike | undefined {
-    if (agents === undefined || typeof sessionId !== 'string') return undefined
-    return agents.get(sessionId)
+    if (typeof sessionId !== 'string') return undefined
+    return agents!.get(sessionId)
   }
 
   function cwdOf(sessionId: unknown): string | undefined {
@@ -192,41 +158,16 @@ export function apply(ctx: Context): void {
     }
   }
 
-  function emptyIndex(): ArchiveIndex {
-    return { version: 1, skills: {}, trash: {}, usage: {} }
-  }
-
-  function normalizeIndex(parsed: unknown): ArchiveIndex {
-    const p = (parsed ?? {}) as { skills?: unknown; trash?: unknown; usage?: unknown }
-    return {
-      version: 1,
-      skills: p.skills !== null && typeof p.skills === 'object' ? p.skills as Record<string, IndexEntry> : {},
-      trash: p.trash !== null && typeof p.trash === 'object' ? p.trash as Record<string, TrashRecord> : {},
-      usage: p.usage !== null && typeof p.usage === 'object' ? p.usage as Record<string, UsageRecord> : {},
-    }
-  }
-
-  async function readIndex(cwd: string | undefined): Promise<ArchiveIndex> {
-    if (fs === undefined || cwd === undefined) return emptyIndex()
-    try {
-      const target = await fs.resolve(join(cwd, '.dsh', 'skill-manager', 'index.json'), { cwd })
-      return normalizeIndex(JSON.parse(await fs.readText(target)))
-    } catch (error) {
-      return emptyIndex()
-    }
-  }
-
   async function runShell(command: string, targetPath: string, policyOverride?: unknown): Promise<void> {
-    if (shell === undefined) throw new Error('shell 服务不可用')
     const request: { command: string; sandboxPolicy?: unknown } = { command }
     if (policyOverride !== undefined) {
       request.sandboxPolicy = policyOverride
-    } else if (sandboxPolicy !== undefined) {
-      const ws = sandboxPolicy.workspaceRoot
+    } else {
+      const ws = sandboxPolicy!.workspaceRoot
       const mode = ws !== undefined && isWithin(targetPath, ws) ? 'workspace-write' : 'danger-full-access'
-      request.sandboxPolicy = sandboxPolicy.resolve({ mode })
+      request.sandboxPolicy = sandboxPolicy!.resolve({ mode })
     }
-    const result = await shell.run(shell.resolve(request))
+    const result = await shell!.run(shell!.resolve(request))
     if (result.sandbox !== undefined && result.sandbox.denied === true) {
       throw new Error(`文件操作被沙箱拒绝（${result.sandbox.mode}）`)
     }
@@ -238,34 +179,55 @@ export function apply(ctx: Context): void {
     }
   }
 
-  async function writeIndex(cwd: string | undefined, index: ArchiveIndex): Promise<void> {
-    if (fs === undefined) throw new Error('fs 服务不可用')
-    if (cwd === undefined) throw new Error('无法确定当前工作目录')
-    await runShell(mkdirCommand(join(cwd, '.dsh', 'skill-manager'), IS_WINDOWS), join(cwd, '.dsh'))
-    const target = await fs.resolve(join(cwd, '.dsh', 'skill-manager', 'index.json'), { cwd })
-    await fs.writeText(target, JSON.stringify(index, null, 2))
+  const indexStore = createIndexStore({
+    async read(cwd) {
+      const target = await fs.resolve(join(cwd, '.dsh', 'skill-manager', 'index.json'), { cwd })
+      return fs.readText(target)
+    },
+    async writeAtomic(cwd, value) {
+      const dir = join(cwd, '.dsh', 'skill-manager')
+      const targetPath = join(dir, 'index.json')
+      const temporaryPath = join(dir, `.index.json.${process.pid}-${uuid4()}.tmp`)
+      await runShell(mkdirCommand(dir, IS_WINDOWS), join(cwd, '.dsh'))
+      const temporaryTarget = await fs.resolve(temporaryPath, { cwd })
+      try {
+        await fs.writeText(temporaryTarget, value)
+        await runShell(atomicReplaceCommand(temporaryPath, targetPath, IS_WINDOWS), dir)
+      } catch (error) {
+        try { await runShell(removeRecursiveCommand(temporaryPath, IS_WINDOWS), dir) } catch { /* best-effort temp cleanup */ }
+        throw error
+      }
+    },
+  })
+
+  const readIndex = (cwd: string | undefined) => indexStore.read(cwd)
+
+  class IndexOperationRejected extends Error {
+    constructor(readonly response: { ok: false; error: string }) {
+      super(response.error)
+    }
+  }
+
+  async function updateIndexOrReject<T>(cwd: string, mutate: (index: Awaited<ReturnType<typeof readIndex>>) => Promise<T>): Promise<T | { ok: false; error: string }> {
+    try {
+      return await indexStore.update(cwd, mutate)
+    } catch (error) {
+      if (error instanceof IndexOperationRejected) return error.response
+      throw error
+    }
+  }
+
+  function rejectIndexOperation(error: string): never {
+    throw new IndexOperationRejected({ ok: false, error })
   }
 
   // ---------- 技能调用埋点（次数/频率统计） ----------
 
-  /** 每个工作区的 index 写锁：读-改-写必须串行，避免 tools/result 的
-   * 异步埋点与显式建档/停用操作相互覆盖。 */
-  const indexWrites = new Map<string, Promise<void>>()
-
-  function withIndexLock<T>(cwd: string, task: () => Promise<T>): Promise<T> {
-    const prev = indexWrites.get(cwd) ?? Promise.resolve()
-    const next = prev.then(task, task)
-    indexWrites.set(cwd, next.then(() => undefined, () => undefined))
-    return next
-  }
-
   /** 记录一次技能调用：读取 index → 折叠进 usage → 回写。 */
   function recordSkillUse(cwd: string, name: string): void {
     if (!NAME_RE.test(name)) return
-    void withIndexLock(cwd, async () => {
-      const index = await readIndex(cwd)
+    void indexStore.update(cwd, (index) => {
       recordUsage(index.usage, name, Date.now())
-      await writeIndex(cwd, index)
     }).catch(() => {
       // 埋点失败不打断技能本身；调用统计是可丢失的观察数据。
     })
@@ -451,21 +413,21 @@ export function apply(ctx: Context): void {
         const contentHash = definition === undefined
           ? undefined
           : createHash('sha256').update(definition.content).digest('hex').slice(0, 16)
-        const index = await readIndex(cwd)
         const now = Date.now()
-        index.skills[name] = {
-          name,
-          direction,
-          useScope,
-          boundaries,
-          scenarios,
-          notes: typeof args.notes === 'string' && args.notes.trim() !== '' ? args.notes.trim() : undefined,
-          origin,
-          updatedAt: now,
-          reviewedAt: now,
-          ...(contentHash !== undefined ? { contentHash } : {}),
-        }
-        await writeIndex(cwd, index)
+        await indexStore.update(cwd, (index) => {
+          index.skills[name] = {
+            name,
+            direction,
+            useScope,
+            boundaries,
+            scenarios,
+            notes: typeof args.notes === 'string' && args.notes.trim() !== '' ? args.notes.trim() : undefined,
+            origin,
+            updatedAt: now,
+            reviewedAt: now,
+            ...(contentHash !== undefined ? { contentHash } : {}),
+          }
+        })
         return { ok: true, message: `已为技能 "${name}" 建档（方向：${direction}）` }
       },
     })
@@ -672,19 +634,19 @@ export function apply(ctx: Context): void {
         if (!NAME_RE.test(name)) throw new Error(`无效的技能名：${name}`)
         const agent = exec.agent as AgentLike | undefined
         if (agent === undefined) throw new Error('无法确定当前会话')
-        const index = await readIndex(agent.session.header.cwd)
-        const entry = index.skills[name]
-        if (entry === null || typeof entry !== 'object') throw new Error(`技能 "${name}" 未建档`)
         const conclusion: '有效' | '无效' | '待评测' = args.conclusion === '有效' || args.conclusion === '无效' || args.conclusion === '待评测'
           ? args.conclusion
           : '待评测'
-        entry.evaluation = {
-          score: typeof args.score === 'number' && Number.isFinite(args.score) ? args.score : null,
-          judgedAt: Date.now(),
-          baselineDelta: typeof args.baselineDelta === 'string' && args.baselineDelta.trim() !== '' ? args.baselineDelta.trim() : null,
-          conclusion,
-        }
-        await writeIndex(agent.session.header.cwd, index)
+        await indexStore.update(agent.session.header.cwd, (index) => {
+          const entry = index.skills[name]
+          if (entry === null || typeof entry !== 'object') throw new Error(`技能 "${name}" 未建档`)
+          entry.evaluation = {
+            score: typeof args.score === 'number' && Number.isFinite(args.score) ? args.score : null,
+            judgedAt: Date.now(),
+            baselineDelta: typeof args.baselineDelta === 'string' && args.baselineDelta.trim() !== '' ? args.baselineDelta.trim() : null,
+            conclusion,
+          }
+        })
         return { ok: true, message: `已记录技能 "${name}" 的评测结论：${conclusion}` }
       },
     })
@@ -822,13 +784,14 @@ export function apply(ctx: Context): void {
       if (entryInfo === undefined) return { ok: false, error: '该技能不是文件系统技能，无法停用' }
       const cwd = cwdOf(sessionId)
       if (cwd === undefined) return { ok: false, error: '无法确定当前工作目录' }
-      const index = await readIndex(cwd)
       const trashDir = trashDirOf(entryInfo.root)
-      const trashedPath = join(trashDir, `${name}-${Date.now()}`)
-      await runShell(mkdirCommand(trashDir, IS_WINDOWS), entryInfo.root)
-      await runShell(moveNoClobberCommand(entryInfo.entry, trashedPath, IS_WINDOWS), entryInfo.root)
-      index.trash[name] = { name, originalPath: entryInfo.entry, trashedPath, root: entryInfo.root, removedAt: Date.now() }
-      await writeIndex(cwd, index)
+      const removedAt = Date.now()
+      const trashedPath = join(trashDir, `${name}-${removedAt}`)
+      await indexStore.update(cwd, async (index) => {
+        await runShell(mkdirCommand(trashDir, IS_WINDOWS), entryInfo.root)
+        await runShell(moveNoClobberCommand(entryInfo.entry, trashedPath, IS_WINDOWS), entryInfo.root)
+        index.trash[name] = { name, originalPath: entryInfo.entry, trashedPath, root: entryInfo.root, removedAt }
+      })
       return { ok: true }
     },
 
@@ -838,19 +801,19 @@ export function apply(ctx: Context): void {
       const sessionId = typeof args.sessionId === 'string' ? args.sessionId : undefined
       const cwd = cwdOf(sessionId)
       if (cwd === undefined) return { ok: false, error: '无法确定当前工作目录' }
-      const index = await readIndex(cwd)
-      const record = index.trash[name]
-      if (record === null || typeof record !== 'object') return { ok: false, error: '未找到该技能的停用记录' }
-      const { trashedPath, originalPath, root } = record
-      if (typeof trashedPath !== 'string' || typeof originalPath !== 'string' || typeof root !== 'string' || trashedPath === '' || originalPath === '' || root === '') {
-        return { ok: false, error: '停用记录损坏' }
-      }
-      if (await realpathWithin(trashedPath, trashDirOf(root)) !== true) return { ok: false, error: '停用记录路径异常，拒绝操作' }
-      if (!isWithin(originalPath, root)) return { ok: false, error: '停用记录路径异常，拒绝操作' }
-      await runShell(moveNoClobberCommand(trashedPath, originalPath, IS_WINDOWS), root)
-      delete index.trash[name]
-      await writeIndex(cwd, index)
-      return { ok: true }
+      return updateIndexOrReject(cwd, async (index) => {
+        const record = index.trash[name]
+        if (record === null || typeof record !== 'object') rejectIndexOperation('未找到该技能的停用记录')
+        const { trashedPath, originalPath, root } = record
+        if (typeof trashedPath !== 'string' || typeof originalPath !== 'string' || typeof root !== 'string' || trashedPath === '' || originalPath === '' || root === '') {
+          rejectIndexOperation('停用记录损坏')
+        }
+        if (await realpathWithin(trashedPath, trashDirOf(root)) !== true) rejectIndexOperation('停用记录路径异常，拒绝操作')
+        if (!isWithin(originalPath, root)) rejectIndexOperation('停用记录路径异常，拒绝操作')
+        await runShell(moveNoClobberCommand(trashedPath, originalPath, IS_WINDOWS), root)
+        delete index.trash[name]
+        return { ok: true }
+      })
     },
 
     async deleteTrash(args) {
@@ -859,18 +822,18 @@ export function apply(ctx: Context): void {
       const sessionId = typeof args.sessionId === 'string' ? args.sessionId : undefined
       const cwd = cwdOf(sessionId)
       if (cwd === undefined) return { ok: false, error: '无法确定当前工作目录' }
-      const index = await readIndex(cwd)
-      const record = index.trash[name]
-      if (record === null || typeof record !== 'object') return { ok: false, error: '未找到该技能的停用记录' }
-      const { trashedPath, root } = record
-      if (typeof trashedPath !== 'string' || typeof root !== 'string' || trashedPath === '' || root === '') {
-        return { ok: false, error: '停用记录损坏' }
-      }
-      if (await realpathWithin(trashedPath, trashDirOf(root)) === false) return { ok: false, error: '停用记录路径异常，拒绝操作' }
-      await runShell(removeRecursiveCommand(trashedPath, IS_WINDOWS), root)
-      delete index.trash[name]
-      await writeIndex(cwd, index)
-      return { ok: true }
+      return updateIndexOrReject(cwd, async (index) => {
+        const record = index.trash[name]
+        if (record === null || typeof record !== 'object') rejectIndexOperation('未找到该技能的停用记录')
+        const { trashedPath, root } = record
+        if (typeof trashedPath !== 'string' || typeof root !== 'string' || trashedPath === '' || root === '') {
+          rejectIndexOperation('停用记录损坏')
+        }
+        if (await realpathWithin(trashedPath, trashDirOf(root)) === false) rejectIndexOperation('停用记录路径异常，拒绝操作')
+        await runShell(removeRecursiveCommand(trashedPath, IS_WINDOWS), root)
+        delete index.trash[name]
+        return { ok: true }
+      })
     },
 
     async setOrigin(args) {
@@ -884,15 +847,15 @@ export function apply(ctx: Context): void {
       const sessionId = typeof args.sessionId === 'string' ? args.sessionId : undefined
       const cwd = cwdOf(sessionId)
       if (cwd === undefined) return { ok: false, error: '无法确定当前工作目录' }
-      const index = await readIndex(cwd)
-      const entry = index.skills[name]
-      if (entry === null || typeof entry !== 'object') {
-        index.skills[name] = { name, origin, updatedAt: Date.now() }
-      } else {
-        entry.origin = origin
-        entry.updatedAt = Date.now()
-      }
-      await writeIndex(cwd, index)
+      await indexStore.update(cwd, (index) => {
+        const entry = index.skills[name]
+        if (entry === null || typeof entry !== 'object') {
+          index.skills[name] = { name, origin, updatedAt: Date.now() }
+        } else {
+          entry.origin = origin
+          entry.updatedAt = Date.now()
+        }
+      })
       return { ok: true }
     },
   }

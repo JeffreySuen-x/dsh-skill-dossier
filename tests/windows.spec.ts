@@ -1,6 +1,6 @@
 import * as win32 from 'node:path/win32'
 import { describe, expect, it } from 'vitest'
-import { fsEntryOf, isWithin, mkdirCommand, moveNoClobberCommand, quoteShellArg, removeRecursiveCommand, trashDirOf } from '../src/files.ts'
+import { atomicReplaceCommand, fsEntryOf, isWithin, mkdirCommand, moveNoClobberCommand, quoteShellArg, removeRecursiveCommand, trashDirOf } from '../src/files.ts'
 
 describe('Windows 路径解析（path.win32）', () => {
   it('fsEntryOf 解析反斜杠 SKILL.md 路径', () => {
@@ -54,6 +54,12 @@ describe('pwsh 命令生成（isWindows=true）', () => {
   it('remove 用 Remove-Item', () => {
     expect(removeRecursiveCommand('C:\\x', true)).toBe("Remove-Item -Recurse -Force -Path 'C:\\x'")
   })
+
+  it('原子替换用 .NET 字面路径重载', () => {
+    expect(atomicReplaceCommand('C:\\a[b]\\temp', 'C:\\a[b]\\index.json', true)).toBe(
+      "[System.IO.File]::Move('C:\\a[b]\\temp', 'C:\\a[b]\\index.json', $true)",
+    )
+  })
 })
 
 describe('bash 命令生成（isWindows=false 回归）', () => {
@@ -61,5 +67,6 @@ describe('bash 命令生成（isWindows=false 回归）', () => {
     expect(mkdirCommand('/a b', false)).toBe("mkdir -p '/a b'")
     expect(moveNoClobberCommand('/s', '/d', false)).toBe("mv -n '/s' '/d'")
     expect(removeRecursiveCommand('/x', false)).toBe("rm -rf -- '/x'")
+    expect(atomicReplaceCommand('/a/temp', '/a/index.json', false)).toBe("mv -f -- '/a/temp' '/a/index.json'")
   })
 })

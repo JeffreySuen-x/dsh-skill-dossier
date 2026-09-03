@@ -72,3 +72,10 @@ export function removeRecursiveCommand(path: string, isWindows: boolean): string
     ? `Remove-Item -Recurse -Force -Path ${quoteShellArg(path, isWindows)}`
     : `rm -rf -- ${quoteShellArg(path, isWindows)}`
 }
+
+/** Replace a file by renaming a same-directory temporary file over it. */
+export function atomicReplaceCommand(src: string, dst: string, isWindows: boolean): string {
+  return isWindows
+    ? `[System.IO.File]::Move(${quoteShellArg(src, true)}, ${quoteShellArg(dst, true)}, $true)`
+    : `mv -f -- ${quoteShellArg(src, false)} ${quoteShellArg(dst, false)}`
+}

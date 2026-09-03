@@ -17,10 +17,14 @@ function hostContext(options: {
   listDir?: () => Promise<Array<{ name?: string; path?: string }>>
   writeText?: (target: unknown, content: string) => Promise<void>
   followup?: (message: unknown) => void
+  indexText?: string
+  indexReadError?: Error
+  shellRun?: (request: any) => Promise<{ exitCode: number; stderr?: { text?: string } }>
 } = {}) {
   const routes = new Map<string, Route>()
   const services = new Map<string, unknown>()
   const today = currentDateKey()
+  const shellCommands: string[] = []
 
   services.set('skills', {
     list: async () => [],
@@ -43,17 +47,30 @@ function hostContext(options: {
   services.set('fs', {
     resolve: async (path: string, options?: { cwd?: string }) => `${options?.cwd ?? ''}/${path}`,
     listDir: options.listDir ?? (async () => [{ name: `${today}.md` }]),
-    readText: async () => `---\ndate: ${today}\n---\n\n# Brief\n\n## 管理插件\n- 作用：管理技能\n- 实现：host + client\n- 今日进度：\n  1. 单包汇报\n- 待办：\n- 问题：\n`,
+    readText: async (target: unknown) => {
+      if (String(target).endsWith('/.dsh/skill-manager/index.json')) {
+        if (options.indexReadError !== undefined) throw options.indexReadError
+        if (options.indexText === undefined) throw Object.assign(new Error('missing'), { code: 'ENOENT' })
+        return options.indexText
+      }
+      return `---\ndate: ${today}\n---\n\n# Brief\n\n## 管理插件\n- 作用：管理技能\n- 实现：host + client\n- 今日进度：\n  1. 单包汇报\n- 待办：\n- 问题：\n`
+    },
     writeText: options.writeText ?? (async () => undefined),
   })
-  services.set('shell', { resolve: (request: unknown) => request, run: async () => ({ exitCode: 0 }) })
+  services.set('shell', {
+    resolve: (request: unknown) => request,
+    run: async (request: any) => {
+      shellCommands.push(String(request?.command ?? ''))
+      return options.shellRun === undefined ? { exitCode: 0 } : options.shellRun(request)
+    },
+  })
   services.set('sandboxPolicy', { workspaceRoot: '/workspace', resolve: () => ({}) })
 
   const ctx = {
     get(name: string) { return services.get(name) },
     effect(setup: () => unknown) { setup() },
   }
-  return { ctx, routes }
+  return { ctx, routes, shellCommands }
 }
 
 async function post(route: Route, body: unknown, headers: Record<string, string> = { host: '127.0.0.1:3080' }) {
@@ -112,6 +129,93 @@ describe('single-package host activation', () => {
     )
 
     expect(crossSite).toEqual({ status: 403, body: { error: '跨站请求被拒绝' } })
+  })
+
+  it('surfaces a corrupt manager index instead of replacing it with an empty one', async () => {
+    const writes: unknown[] = []
+    const { ctx, routes } = hostContext({
+      indexText: '{oops',
+      writeText: async (target) => { writes.push(target) },
+    })
+    apply(ctx as never)
+
+    const response = await post(routes.get('/api/skill-manager')!, { method: 'list', args: { sessionId: 'session-1' } })
+
+    expect(response.status).toBe(500)
+    expect(response.body.error).toContain('索引文件损坏')
+    expect(writes).toEqual([])
+  })
+
+  it('writes manager index changes through a same-directory atomic replacement', async () => {
+    const writes: string[] = []
+    const { ctx, routes, shellCommands } = hostContext({
+      writeText: async (target) => { writes.push(String(target)) },
+    })
+    apply(ctx as never)
+
+    const response = await post(routes.get('/api/skill-manager')!, {
+      method: 'setOrigin',
+      args: { sessionId: 'session-1', name: 'alpha', origin: 'self' },
+    })
+
+    expect(response).toEqual({ status: 200, body: { ok: true } })
+    expect(writes).toHaveLength(1)
+    expect(writes[0]).toMatch(/\/\.dsh\/skill-manager\/\.index\.json\..+\.tmp$/)
+    expect(shellCommands.some((command) => command.startsWith('mv -f -- '))).toBe(true)
+    expect(shellCommands.some((command) => command.endsWith("'/workspace/.dsh/skill-manager/index.json'"))).toBe(true)
+  })
+
+  it('reports atomic replacement failure and attempts to clean the temporary file', async () => {
+    const writes: string[] = []
+    const { ctx, routes, shellCommands } = hostContext({
+      writeText: async (target) => { writes.push(String(target)) },
+      shellRun: async (request) => String(request?.command ?? '').startsWith('mv -f -- ')
+        ? { exitCode: 1, stderr: { text: 'replace failed' } }
+        : { exitCode: 0 },
+    })
+    apply(ctx as never)
+
+    const response = await post(routes.get('/api/skill-manager')!, {
+      method: 'setOrigin',
+      args: { sessionId: 'session-1', name: 'alpha', origin: 'self' },
+    })
+
+    expect(response.status).toBe(500)
+    expect(response.body.error).toContain('replace failed')
+    expect(writes).toHaveLength(1)
+    expect(shellCommands.some((command) => command.startsWith('rm -rf -- '))).toBe(true)
+  })
+
+  it('attempts temporary-file cleanup when staging the new index fails', async () => {
+    const { ctx, routes, shellCommands } = hostContext({
+      writeText: async () => { throw new Error('stage failed') },
+    })
+    apply(ctx as never)
+
+    const response = await post(routes.get('/api/skill-manager')!, {
+      method: 'setOrigin',
+      args: { sessionId: 'session-1', name: 'alpha', origin: 'self' },
+    })
+
+    expect(response.status).toBe(500)
+    expect(response.body.error).toContain('stage failed')
+    expect(shellCommands.some((command) => command.startsWith('rm -rf -- '))).toBe(true)
+  })
+
+  it('does not create or rewrite the index for a rejected lifecycle operation', async () => {
+    const writes: string[] = []
+    const { ctx, routes } = hostContext({
+      writeText: async (target) => { writes.push(String(target)) },
+    })
+    apply(ctx as never)
+
+    const response = await post(routes.get('/api/skill-manager')!, {
+      method: 'reinstall',
+      args: { sessionId: 'session-1', name: 'missing' },
+    })
+
+    expect(response).toEqual({ status: 200, body: { ok: false, error: '未找到该技能的停用记录' } })
+    expect(writes).toEqual([])
   })
 
   it('generates monthly data, exports both formats, and reviews the actual brief contract', async () => {

@@ -28,5 +28,7 @@ export declare function quoteShellArg(value: string, isWindows: boolean): string
 export declare function mkdirCommand(dir: string, isWindows: boolean): string;
 export declare function moveNoClobberCommand(src: string, dst: string, isWindows: boolean): string;
 export declare function removeRecursiveCommand(path: string, isWindows: boolean): string;
+/** Replace a file by renaming a same-directory temporary file over it. */
+export declare function atomicReplaceCommand(src: string, dst: string, isWindows: boolean): string;
 export {};
 //# sourceMappingURL=files.d.ts.map

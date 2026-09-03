@@ -1,6 +1,6 @@
 # dsh-skill-manager
 
-DeepSeek Harness（DSH）的技能全生命周期管理插件：目录浏览、一键 `/name` 调用、识别建档（10 类方向/使用范围/能力边界/应用场景）、两段式路由、调用统计、保鲜复审、有效性评测触发、文件夹技能停用·重装·删除、会话级临时技能。host 半 + 浏览器半（会话头部 `Skills` 按钮）。
+DeepSeek Harness（DSH）的技能全生命周期与工作汇报插件：目录浏览、一键填入 `/name` 调用手势、识别建档（10 类方向/使用范围/能力边界/应用场景）、两段式路由、调用统计、保鲜复审、有效性评测触发、文件夹技能停用·重装·删除、临时技能，以及基于 `reporter/brief/` 的日报、月度、复盘与导出。host 半 + 浏览器半（会话头部「管理」按钮）。
 
 ## 功能
 
@@ -13,6 +13,7 @@ DeepSeek Harness（DSH）的技能全生命周期管理插件：目录浏览、�
 - **有效性评测（skill_eval / record_eval）**：触发 darwin-skill 在对话框外做「带 vs 不带」对比评测，并把结论写回档案
 - **生命周期**：文件夹技能停用（移入 trash，可逆）→ 重装 / 彻底删除
 - **临时技能**：会话级注册/卸载运行时技能
+- **工作汇报**：读取 `reporter/brief/YYYY-MM-DD.md` 展示日报/月度，触发复盘并导出 Markdown/JSON；`/api/report` 后端已内置在本包
 
 ## 安装（git）
 
@@ -22,7 +23,7 @@ DeepSeek Harness（DSH）的技能全生命周期管理插件：目录浏览、�
 dsh plugin --profile web add github:JeffreySuen-x/dsh-skill-manager
 ```
 
-本仓库**已提交 `lib/` 构建产物**，git 安装即装即用，无需授权构建。
+本仓库**已提交 `lib/` 构建产物**，git 安装即装即用，无需授权构建。管理 host、管理 client 与汇报 host 均由这一个 package 激活，不需要再安装独立的 `@deepseek-ai/dsh-report`。
 
 ## 从源码重建
 
@@ -31,10 +32,15 @@ dsh plugin --profile web add github:JeffreySuen-x/dsh-skill-manager
 ```sh
 pnpm install        # 拉取构建工具 + 类型依赖（@deepseek-ai/* 为公开包）
 pnpm run build      # tsc 产出 lib/types + tsdown 打包 lib/index.js、lib/client.js
-pnpm run test       # 46 条单测
+pnpm run test       # 单元测试 + manager/report HTTP 集成测试
+pnpm run pack:smoke # tarball 临时安装并验证两个 API 路由
 ```
 
 改完 `src/` 后运行 `pnpm run build` 并提交 `lib/`，即可保证仓库始终自洽（不会出现「改了 src 但 lib 没更新」的隐患）。
+
+## 从旧的双包配置迁移
+
+早期版本把 `/api/report` 放在独立的 `@deepseek-ai/dsh-report` 包，并要求 profile 手工 link/insert。当前版本已将汇报后端并入本包。升级并重启 DSH 前，应从 profile dependencies 与 `cordis.patch.yml` 中移除旧 report 包和 `insert report` 行，避免 `/api/report` 重复注册；`reporter/brief/`、`reporter/Review/` 与 `reporter/export/` 数据目录无需迁移。
 
 > 注意：类型依赖（`@deepseek-ai/cordis` 等）是 type-only、运行时被擦除；若 `pnpm install` 解析不到这些公开包，`pnpm run bundle`（仅 tsdown 打包）仍可独立工作，只是 `tsc` 类型检查跑不了。
 

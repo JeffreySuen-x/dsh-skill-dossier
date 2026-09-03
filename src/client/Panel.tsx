@@ -691,7 +691,15 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
     setReportData(null)
     const method = view === 'monthly' ? 'generateMonthly' : 'generateDaily'
     reportRpc<ReportData>(method, { sessionId })
-      .then((data) => { setReportData(data); setReportLoading(false) })
+      .then((data) => {
+        if (typeof data.lastError === 'string' && data.lastError !== '') {
+          setReportError(data.lastError)
+          setReportData(null)
+        } else {
+          setReportData(data)
+        }
+        setReportLoading(false)
+      })
       .catch((error: unknown) => { setReportError(String(error)); setReportLoading(false) })
   }
 

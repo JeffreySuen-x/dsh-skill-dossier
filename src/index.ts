@@ -23,6 +23,8 @@ import { DIRECTION_LABELS, detectDirections, isDirectionLabel } from './directio
 import { formatReview, reviewCandidates } from './freshness.ts'
 import { formatUsage, recordUsage, skillGestures, type UsageRecord } from './usage.ts'
 import { fsEntryOf, isWithin, mkdirCommand, moveNoClobberCommand, removeRecursiveCommand, trashDirOf } from './files.ts'
+import { isCrossSiteRequest, readJsonBody, respondJson } from './http.ts'
+import { registerReportApi, type ReportAgentsLike, type ReportFsLike, type ReportSandboxPolicyLike, type ReportWebServerLike } from './report.ts'
 
 /** 与 base bundle 选择 bash/pwsh 的分支一致（process.platform === 'win32'）。 */
 const IS_WINDOWS = process.platform === 'win32'
@@ -51,7 +53,7 @@ export const name = 'skill-manager'
 /** Hard dependencies: the row waits for these services at cold boot instead of
  * applying early and silently skipping registrations (insert rows may mount
  * before some bundle rows have activated). */
-export const inject = ['skills', 'tools', 'webServer', 'agents']
+export const inject = ['skills', 'tools', 'webServer', 'agents', 'fs', 'shell', 'sandboxPolicy']
 
 const NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const MAX_BODY_BYTES = 1024 * 1024
@@ -79,7 +81,8 @@ interface AgentsLike { get(id: string): AgentLike | undefined }
 interface FsLike {
   resolve(path: string, opts?: { cwd?: string }): Promise<unknown>
   readText(target: unknown): Promise<string>
-  writeText(target: unknown, content: string): Promise<unknown>
+  listDir(target: unknown): Promise<Array<{ name?: string; path?: string }>>
+  writeText(target: unknown, content: string, encoding?: unknown, options?: unknown, policy?: unknown): Promise<unknown>
 }
 interface ShellRunResultLike {
   exitCode: number | null
@@ -92,7 +95,7 @@ interface ShellLike {
 }
 interface SandboxPolicyLike {
   workspaceRoot: string
-  resolve(request: { mode: string }): unknown
+  resolve(request?: { mode?: string; session?: unknown }): unknown
 }
 interface ToolsLike { register(tool: unknown): () => void }
 interface WebRouteLike {
@@ -892,72 +895,55 @@ export function apply(ctx: Context): void {
     },
   }
 
-  async function readJsonBody(req: any): Promise<unknown> {
-    let body = ''
-    for await (const chunk of req) {
-      body += String(chunk)
-      if (body.length > MAX_BODY_BYTES) throw new Error('请求体过大')
-    }
-    return body === '' ? {} : JSON.parse(body)
-  }
-
-  function respond(res: any, status: number, payload: unknown): void {
-    res.statusCode = status
-    res.setHeader('content-type', 'application/json; charset=utf-8')
-    res.end(JSON.stringify(payload))
-  }
-
-  /** 拒绝跨站请求：浏览器发 `Sec-Fetch-Site: cross-site`，或 `Origin` 与 Host 不符。
-   * 本 API 破坏性方法（停用/重装/删除）会 mv/rm，必须挡住 CSRF。 */
-  function isCrossSiteRequest(req: any): boolean {
-    const site = req.headers['sec-fetch-site']
-    if (typeof site === 'string' && site === 'cross-site') return true
-    const origin = req.headers['origin']
-    if (typeof origin !== 'string' || origin === '') return false
-    const host = req.headers['host']
-    if (typeof host !== 'string' || host === '') return true
-    try {
-      return new URL(origin).host !== host
-    } catch {
-      return true
-    }
-  }
-
   const routeHandler = async (req: any, res: any): Promise<void> => {
     try {
       if (req.method !== 'POST') {
-        respond(res, 405, { error: 'method not allowed' })
+        respondJson(res, 405, { error: 'method not allowed' })
         return
       }
       if (isCrossSiteRequest(req)) {
-        respond(res, 403, { error: '跨站请求被拒绝' })
+        respondJson(res, 403, { error: '跨站请求被拒绝' })
         return
       }
       let body: unknown
       try {
-        body = await readJsonBody(req)
+        body = await readJsonBody(req, MAX_BODY_BYTES)
       } catch (error) {
-        respond(res, 400, { error: `请求体无效：${String(error)}` })
+        respondJson(res, 400, { error: `请求体无效：${String(error)}` })
         return
       }
       const { method, args } = (body ?? {}) as { method?: unknown; args?: unknown }
       if (typeof method !== 'string') {
-        respond(res, 400, { error: '缺少 method 字段' })
+        respondJson(res, 400, { error: '缺少 method 字段' })
         return
       }
       const handler = handlers[method]
       if (handler === undefined) {
-        respond(res, 404, { error: `未知方法：${method}` })
+        respondJson(res, 404, { error: `未知方法：${method}` })
         return
       }
       const result = await handler(args)
-      respond(res, 200, result)
+      respondJson(res, 200, result)
     } catch (error) {
-      respond(res, 500, { error: String(error) })
+      respondJson(res, 500, { error: String(error) })
     }
   }
 
   if (webServer !== undefined) {
     ctx.effect(() => webServer.register({ kind: 'exact', path: '/api/skill-manager', handler: routeHandler }))
+  }
+  if (webServer !== undefined && agents !== undefined && fs !== undefined && sandboxPolicy !== undefined) {
+    registerReportApi(ctx, {
+      webServer: webServer as unknown as ReportWebServerLike,
+      agents: agents as unknown as ReportAgentsLike,
+      fs: fs as unknown as ReportFsLike,
+      sandboxPolicy: sandboxPolicy as unknown as ReportSandboxPolicyLike,
+      ensureDirectories: async (cwd) => {
+        for (const dir of ['brief', 'Review', 'export']) {
+          const target = join(cwd, 'reporter', dir)
+          await runShell(mkdirCommand(target, IS_WINDOWS), target)
+        }
+      },
+    })
   }
 }

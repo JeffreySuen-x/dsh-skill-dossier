@@ -1,10 +1,11 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { join, relative, sep } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const scratch = mkdtempSync(join(tmpdir(), 'dsh-skill-manager-pack-'))
+const sourceRoot = fileURLToPath(new URL('..', import.meta.url))
 
 function runNpm(args, options = {}) {
   if (process.platform === 'win32') {
@@ -14,17 +15,26 @@ function runNpm(args, options = {}) {
 }
 
 try {
+  const copiedSource = join(scratch, 'source')
+  const packedRoot = join(scratch, 'packed')
+  cpSync(sourceRoot, copiedSource, {
+    recursive: true,
+    filter: (source) => {
+      const topLevel = relative(sourceRoot, source).split(sep)[0]
+      return topLevel !== '.git' && topLevel !== 'node_modules'
+    },
+  })
+  mkdirSync(packedRoot)
   const packOutput = runNpm([
-    'pack', '--json', '--pack-destination', scratch, '--cache', join(scratch, 'npm-cache'),
-  ], { cwd: new URL('..', import.meta.url), encoding: 'utf8' })
+    'pack', '--json', '--pack-destination', '../packed', '--cache', '../npm-cache',
+  ], { cwd: copiedSource, encoding: 'utf8' })
   const packed = JSON.parse(packOutput)[0]
   if (packed?.filename === undefined) throw new Error('npm pack did not return a tarball filename')
-  const tarball = join(scratch, packed.filename)
   const installRoot = join(scratch, 'install')
   runNpm([
-    'install', '--prefix', installRoot, '--ignore-scripts', '--no-audit', '--no-fund', '--legacy-peer-deps',
-    '--cache', join(scratch, 'npm-cache'), tarball,
-  ], { stdio: 'pipe' })
+    'install', '--prefix', 'install', '--ignore-scripts', '--no-audit', '--no-fund', '--legacy-peer-deps',
+    '--cache', 'npm-cache', `./${join('packed', packed.filename)}`,
+  ], { cwd: scratch, stdio: 'pipe' })
 
   const packageRoot = join(installRoot, 'node_modules', 'dsh-skill-manager')
   const required = [

@@ -53,11 +53,12 @@ describe('brief report contract', () => {
   it('escapes markdown table delimiters and line breaks in brief content', () => {
     const markdown = toMarkdown({
       month: '2026-09',
-      days: [{ date: '2026-09-03', projects: ['A | B'], progress: ['第一行\n第二行'], todo: [], issues: [] }],
+      days: [{ date: '2026-09-03', projects: ['A | B', 'C \\| D'], progress: ['第一行\n第二行'], todo: [], issues: [] }],
       projects: [],
     }, 'monthly')
 
-    expect(markdown).toContain('A \\| B')
+    expect(markdown).toContain('A &#124; B')
+    expect(markdown).toContain('C \\&#124; D')
     expect(markdown).toContain('第一行<br>第二行')
   })
 

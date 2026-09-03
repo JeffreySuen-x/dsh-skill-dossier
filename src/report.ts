@@ -139,7 +139,7 @@ export function toMarkdown(data: any, view: 'daily' | 'monthly'): string {
 }
 
 function tableCell(value: unknown): string {
-  return String(value ?? '').replaceAll('|', '\\|').replace(/\r?\n/g, '<br>')
+  return String(value ?? '').replaceAll('|', '&#124;').replace(/\r?\n/g, '<br>')
 }
 
 function appendItems(lines: string[], label: string, values: string[] | undefined, empty: string, prefix = '- '): void {

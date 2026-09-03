@@ -37,7 +37,11 @@ function hostContext(options: {
   indexReadError?: Error
   shellRun?: (request: any) => Promise<{ exitCode: number; stderr?: { text?: string } }>
   skill?: FakeSkill
-  listSkills?: (view: unknown, visible: FakeSkill[]) => Promise<FakeSkill[]>
+  listSkills?: (
+    view: unknown,
+    visible: FakeSkill[],
+    registerSessionSkill: (sessionId: string, skill: FakeSkill) => () => void,
+  ) => Promise<FakeSkill[]>
 } = {}) {
   const routes = new Map<string, Route>()
   const services = new Map<string, unknown>()
@@ -47,6 +51,7 @@ function hostContext(options: {
   const globalRuntime = new Map<string, FakeSkill>()
   const sessionRuntime = new Map<string, Map<string, FakeSkill>>()
   const sessionDisposers = new Map<string, Set<() => void>>()
+  const sessionActive = new Map<string, boolean>()
   const pluginDisposers = new Set<() => void>()
   const scopeIds = new WeakMap<object, string>()
 
@@ -92,7 +97,13 @@ function hostContext(options: {
   const rootSkills = {
     list: async (view?: unknown) => {
       const visible = visibleSkills(sessionIdOf(view))
-      return options.listSkills === undefined ? visible : options.listSkills(view, visible)
+      return options.listSkills === undefined
+        ? visible
+        : options.listSkills(view, visible, (sessionId, skill) => {
+            const runtime = sessionRuntime.get(sessionId)
+            if (runtime === undefined) return () => undefined
+            return registerInto(runtime, skill, sessionDisposers.get(sessionId))
+          })
     },
     get: async (name: string, view?: unknown) => visibleSkills(sessionIdOf(view)).find((skill) => skill.name === name),
     register: (skill: unknown) => registerInto(globalRuntime, skill),
@@ -108,6 +119,7 @@ function hostContext(options: {
   })
   const sessionAgents = new Map<string, any>()
   for (const id of ['session-1', 'session-2']) {
+    sessionActive.set(id, true)
     const disposers = new Set<() => void>()
     sessionDisposers.set(id, disposers)
     const runtime = new Map<string, FakeSkill>()
@@ -122,8 +134,16 @@ function hostContext(options: {
       ctx: {
         get: (name: string) => name === 'skills' ? scopedSkills : undefined,
         effect: (setup: () => unknown) => {
-          const dispose = setup()
-          if (typeof dispose === 'function') disposers.add(dispose as () => void)
+          if (sessionActive.get(id) !== true) throw new Error('INACTIVE_EFFECT cannot create effect on inactive context')
+          const cleanup = setup()
+          let effectActive = true
+          const dispose = () => {
+            if (!effectActive) return
+            effectActive = false
+            disposers.delete(dispose)
+            if (typeof cleanup === 'function') cleanup()
+          }
+          disposers.add(dispose)
           return dispose
         },
       },
@@ -169,6 +189,7 @@ function hostContext(options: {
     routes,
     shellCommands,
     disposeSession(id: string) {
+      sessionActive.set(id, false)
       for (const dispose of [...(sessionDisposers.get(id) ?? [])].reverse()) dispose()
       sessionAgents.delete(id)
     },
@@ -178,6 +199,9 @@ function hostContext(options: {
     },
     sessionSkillNames(id: string) {
       return [...(sessionRuntime.get(id)?.keys() ?? [])]
+    },
+    sessionDisposerCount(id: string) {
+      return sessionDisposers.get(id)?.size ?? 0
     },
   }
 }
@@ -332,7 +356,7 @@ describe('single-package host activation', () => {
   })
 
   it('serializes same-session replacement and unregisters the winning registration', async () => {
-    const { ctx, routes } = hostContext()
+    const { ctx, routes, sessionDisposerCount } = hostContext()
     apply(ctx as never)
     const route = routes.get('/api/skill-manager')!
 
@@ -352,6 +376,7 @@ describe('single-package host activation', () => {
     expect((await post(route, { method: 'get', args: { sessionId: 'session-1', name: 'racing-skill' } })).body.content).toBe('second body')
     expect((await post(route, { method: 'unregister', args: { sessionId: 'session-1', name: 'racing-skill' } })).body).toEqual({ ok: true })
     expect((await post(route, { method: 'get', args: { sessionId: 'session-1', name: 'racing-skill' } })).body).toBeNull()
+    expect(sessionDisposerCount('session-1')).toBe(0)
   })
 
   it('lets agent-scope disposal remove its temporary skill registrations', async () => {
@@ -374,7 +399,7 @@ describe('single-package host activation', () => {
   })
 
   it('disposes temporary skills from every live session when the plugin stops', async () => {
-    const { ctx, routes, disposePlugin, sessionSkillNames } = hostContext()
+    const { ctx, routes, disposePlugin, sessionSkillNames, sessionDisposerCount } = hostContext()
     apply(ctx as never)
     const route = routes.get('/api/skill-manager')!
     for (const sessionId of ['session-1', 'session-2']) {
@@ -389,6 +414,8 @@ describe('single-package host activation', () => {
 
     expect(sessionSkillNames('session-1')).toEqual([])
     expect(sessionSkillNames('session-2')).toEqual([])
+    expect(sessionDisposerCount('session-1')).toBe(0)
+    expect(sessionDisposerCount('session-2')).toBe(0)
     expect(routes.size).toBe(0)
   })
 
@@ -444,6 +471,76 @@ describe('single-package host activation', () => {
 
     expect((await request).body).toEqual({ ok: false, error: '插件或当前会话已停止' })
     expect(sessionSkillNames('session-1')).toEqual([])
+  })
+
+  it('rejects a queued registration after its session becomes inactive', async () => {
+    let releaseList!: () => void
+    let markListStarted!: () => void
+    let listCalls = 0
+    const listStarted = new Promise<void>((resolve) => { markListStarted = resolve })
+    const listReleased = new Promise<void>((resolve) => { releaseList = resolve })
+    const { ctx, routes, disposeSession, sessionSkillNames } = hostContext({
+      listSkills: async (_view, visible) => {
+        listCalls += 1
+        if (listCalls === 1) {
+          markListStarted()
+          await listReleased
+        }
+        return visible
+      },
+    })
+    apply(ctx as never)
+    const route = routes.get('/api/skill-manager')!
+    const first = post(route, {
+      method: 'register',
+      args: { sessionId: 'session-1', name: 'first-waiter', description: 'Temporary', content: 'first' },
+    })
+    await listStarted
+    const queued = post(route, {
+      method: 'register',
+      args: { sessionId: 'session-1', name: 'queued-waiter', description: 'Temporary', content: 'second' },
+    })
+    await new Promise<void>((resolve) => { setImmediate(resolve) })
+
+    disposeSession('session-1')
+    releaseList()
+
+    expect((await first).body).toEqual({ ok: false, error: '插件或当前会话已停止' })
+    expect((await queued).body).toEqual({ ok: false, error: '插件或当前会话已停止' })
+    expect(sessionSkillNames('session-1')).toEqual([])
+  })
+
+  it('rejects a same-layer registration that wins after the catalog snapshot', async () => {
+    let injected = false
+    const competing: FakeSkill = {
+      name: 'contended-skill',
+      description: 'Competing registration',
+      invocation: { modelInvocable: true, userInvocable: true },
+      source: 'runtime',
+      provider: 'competing-plugin',
+      content: 'competing body',
+    }
+    const { ctx, routes, sessionDisposerCount } = hostContext({
+      listSkills: async (_view, visible, registerSessionSkill) => {
+        if (!injected) {
+          injected = true
+          registerSessionSkill('session-1', competing)
+        }
+        return visible
+      },
+    })
+    apply(ctx as never)
+    const route = routes.get('/api/skill-manager')!
+
+    const response = await post(route, {
+      method: 'register',
+      args: { sessionId: 'session-1', name: 'contended-skill', description: 'Ours', content: 'our body' },
+    })
+
+    expect(response.body).toEqual({ ok: false, error: '同名技能 "contended-skill" 已存在' })
+    expect((await post(route, { method: 'get', args: { sessionId: 'session-1', name: 'contended-skill' } })).body)
+      .toMatchObject({ provider: 'competing-plugin', content: 'competing body', owned: false })
+    expect(sessionDisposerCount('session-1')).toBe(1)
   })
 
   it('surfaces a corrupt manager index instead of replacing it with an empty one', async () => {

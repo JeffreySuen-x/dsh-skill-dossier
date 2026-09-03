@@ -81,6 +81,10 @@ interface AgentLike {
   session: { header: { cwd: string } }
   ctx: Context
 }
+interface OwnedState {
+  registrations: Map<string, () => void>
+  disposeOwnership: () => void
+}
 interface AgentsLike { get(id: string): AgentLike | undefined }
 interface FsLike {
   resolve(path: string, opts?: { cwd?: string }): Promise<unknown>
@@ -119,31 +123,47 @@ export function apply(ctx: Context): void {
   const webServer = ctx.get('webServer') as WebServerLike | undefined
   if (skills === undefined || agents === undefined || fs === undefined || shell === undefined || sandboxPolicy === undefined || tools === undefined || webServer === undefined) return
 
-  const owned = new Map<AgentLike, Map<string, () => void>>()
+  const owned = new Map<AgentLike, OwnedState>()
   const temporaryBarriers = new WeakMap<AgentLike, Promise<void>>()
   let active = true
   ctx.effect(() => () => {
     active = false
-    for (const registrations of owned.values()) {
-      for (const dispose of registrations.values()) dispose()
+    for (const state of [...owned.values()]) {
+      for (const dispose of state.registrations.values()) dispose()
+      state.registrations.clear()
+      state.disposeOwnership()
     }
     owned.clear()
   })
 
-  function ownedBy(agent: AgentLike): Map<string, () => void> {
+  function ownedBy(agent: AgentLike): OwnedState {
     const existing = owned.get(agent)
     if (existing !== undefined) return existing
     const registrations = new Map<string, () => void>()
-    owned.set(agent, registrations)
-    agent.ctx.effect(() => () => {
-      if (owned.get(agent) === registrations) owned.delete(agent)
+    let state: OwnedState | undefined
+    const disposeOwnership = agent.ctx.effect(() => () => {
+      registrations.clear()
+      if (state !== undefined && owned.get(agent) === state) owned.delete(agent)
     })
-    return registrations
+    state = { registrations, disposeOwnership }
+    owned.set(agent, state)
+    return state
+  }
+
+  function releaseOwned(agent: AgentLike, state: OwnedState, name: string, dispose: () => void): void {
+    if (state.registrations.get(name) !== dispose) return
+    dispose()
+    state.registrations.delete(name)
+    releaseEmptyOwnership(agent, state)
+  }
+
+  function releaseEmptyOwnership(agent: AgentLike, state: OwnedState): void {
+    if (state.registrations.size === 0 && owned.get(agent) === state) state.disposeOwnership()
   }
 
   function isOwned(sessionId: unknown, name: string): boolean {
     const agent = agentOf(sessionId)
-    return agent !== undefined && owned.get(agent)?.has(name) === true
+    return agent !== undefined && owned.get(agent)?.registrations.has(name) === true
   }
 
   function enqueueTemporary<T>(agent: AgentLike, task: () => Promise<T>): Promise<T> {
@@ -776,32 +796,71 @@ export function apply(ctx: Context): void {
       const agent = agentOf(sessionId)
       if (agent === undefined) return { ok: false, error: '当前会话没有活跃的 agent' }
       return enqueueTemporary(agent, async () => {
-        if (!active) return { ok: false, error: '插件或当前会话已停止' }
+        if (!active || agentOf(sessionId) !== agent) return { ok: false, error: '插件或当前会话已停止' }
         const scopedSkills = agent.ctx.get('skills') as SkillsLike | undefined
         if (scopedSkills === undefined) return { ok: false, error: '当前会话的 skills 服务不可用' }
-        const registrations = ownedBy(agent)
-        const existing = (await skills.list({ scope: agent as unknown, cwd: agent.session.header.cwd })).some((s) => s.name === name)
-        if (!active || agentOf(sessionId) !== agent || owned.get(agent) !== registrations) {
+        let state: OwnedState
+        try {
+          state = ownedBy(agent)
+        } catch {
           return { ok: false, error: '插件或当前会话已停止' }
         }
-        if (existing && !registrations.has(name)) return { ok: false, error: `同名技能 "${name}" 已存在` }
-        const current = registrations.get(name)
+        const view = { scope: agent as unknown, cwd: agent.session.header.cwd }
+        let existing: boolean
+        try {
+          existing = (await skills.list(view)).some((s) => s.name === name)
+        } catch (error) {
+          releaseEmptyOwnership(agent, state)
+          throw error
+        }
+        if (!active || agentOf(sessionId) !== agent || owned.get(agent) !== state) {
+          releaseEmptyOwnership(agent, state)
+          return { ok: false, error: '插件或当前会话已停止' }
+        }
+        if (existing && !state.registrations.has(name)) {
+          releaseEmptyOwnership(agent, state)
+          return { ok: false, error: `同名技能 "${name}" 已存在` }
+        }
+        const current = state.registrations.get(name)
         if (current !== undefined) {
           current()
-          registrations.delete(name)
+          state.registrations.delete(name)
         }
-        const dispose = scopedSkills.register({
-          name,
-          description,
-          ...(typeof args.whenToUse === 'string' && args.whenToUse.trim() !== '' ? { whenToUse: args.whenToUse.trim() } : {}),
-          content,
-          source: 'custom',
-          invocation: {
-            modelInvocable: args.modelInvocable !== false,
-            userInvocable: args.userInvocable !== false,
-          },
-        })
-        registrations.set(name, dispose)
+        const provider = `dsh-skill-manager:${uuid4()}`
+        let dispose: () => void
+        try {
+          dispose = scopedSkills.register({
+            name,
+            description,
+            ...(typeof args.whenToUse === 'string' && args.whenToUse.trim() !== '' ? { whenToUse: args.whenToUse.trim() } : {}),
+            content,
+            source: 'custom',
+            provider,
+            invocation: {
+              modelInvocable: args.modelInvocable !== false,
+              userInvocable: args.userInvocable !== false,
+            },
+          })
+        } catch {
+          releaseEmptyOwnership(agent, state)
+          return { ok: false, error: '插件或当前会话已停止' }
+        }
+        state.registrations.set(name, dispose)
+        let winner: DefinitionLike | undefined
+        try {
+          winner = await skills.get(name, view)
+        } catch (error) {
+          releaseOwned(agent, state, name, dispose)
+          throw error
+        }
+        if (!active || agentOf(sessionId) !== agent || owned.get(agent) !== state || state.registrations.get(name) !== dispose) {
+          releaseOwned(agent, state, name, dispose)
+          return { ok: false, error: '插件或当前会话已停止' }
+        }
+        if (winner?.provider !== provider) {
+          releaseOwned(agent, state, name, dispose)
+          return { ok: false, error: `同名技能 "${name}" 已存在` }
+        }
         return { ok: true }
       })
     },
@@ -813,11 +872,11 @@ export function apply(ctx: Context): void {
       if (agent === undefined) return { ok: false, error: '当前会话没有活跃的 agent' }
       return enqueueTemporary(agent, async () => {
         if (!active || agentOf(sessionId) !== agent) return { ok: false, error: '插件或当前会话已停止' }
-        const registrations = owned.get(agent)
-        const dispose = registrations?.get(args.name)
+        const state = owned.get(agent)
+        if (state === undefined) return { ok: false, error: '该技能不是本会话注册的临时技能' }
+        const dispose = state.registrations.get(args.name)
         if (dispose === undefined) return { ok: false, error: '该技能不是本会话注册的临时技能' }
-        dispose()
-        registrations!.delete(args.name)
+        releaseOwned(agent, state, args.name, dispose)
         return { ok: true }
       })
     },

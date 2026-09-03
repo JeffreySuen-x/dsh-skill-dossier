@@ -61,12 +61,33 @@ export function mkdirCommand(dir: string, isWindows: boolean): string {
     : `mkdir -p ${quoteShellArg(dir, isWindows)}`
 }
 
+function posixIdentityCommand(target: string): string {
+  const value = quoteShellArg(target, false)
+  return `stat -c '%d:%i' -- ${value} 2>/dev/null || stat -f '%d:%i' -- ${value} 2>/dev/null`
+}
+
 export function moveNoClobberCommand(src: string, dst: string, isWindows: boolean): string {
   const source = quoteShellArg(src, isWindows)
   const destination = quoteShellArg(dst, isWindows)
-  return isWindows
-    ? `if (Test-Path -LiteralPath ${destination}) { throw 'destination exists' }; Move-Item -LiteralPath ${source} -Destination ${destination} -ErrorAction Stop`
-    : `if [ -e ${destination} ] || [ -L ${destination} ]; then echo 'destination exists' >&2; exit 17; fi; mv -n -- ${source} ${destination}; [ ! -e ${source} ] && [ ! -L ${source} ]`
+  if (isWindows) {
+    return `if ([System.IO.Directory]::Exists(${source})) { [System.IO.Directory]::Move(${source}, ${destination}) } elseif ([System.IO.File]::Exists(${source})) { [System.IO.File]::Move(${source}, ${destination}) } else { throw 'source missing' }`
+  }
+  const nestedPath = path.posix.join(dst, path.posix.basename(src))
+  const nested = quoteShellArg(nestedPath, false)
+  const sourceIdentity = posixIdentityCommand(src)
+  const destinationIdentity = posixIdentityCommand(dst)
+  const nestedIdentity = posixIdentityCommand(nestedPath)
+  return `source_id=$(${sourceIdentity}) || { echo 'source missing' >&2; exit 18; }; `
+    + `if [ -e ${destination} ] || [ -L ${destination} ]; then echo 'destination exists' >&2; exit 17; fi; `
+    + `mv -n -- ${source} ${destination} || exit $?; `
+    + `destination_id=$(${destinationIdentity}) || destination_id=''; `
+    + `if [ "$source_id" = "$destination_id" ]; then exit 0; fi; `
+    + `nested_id=$(${nestedIdentity}) || nested_id=''; `
+    + `if [ "$source_id" = "$nested_id" ] && [ ! -e ${source} ] && [ ! -L ${source} ]; then `
+    + `mv -n -- ${nested} ${source} || { echo 'move race recovery failed' >&2; exit 19; }; `
+    + `restored_id=$(${sourceIdentity}) || restored_id=''; `
+    + `if [ "$source_id" != "$restored_id" ]; then echo 'move race recovery failed' >&2; exit 19; fi; fi; `
+    + `echo 'destination changed during move' >&2; exit 18`
 }
 
 export function removeRecursiveCommand(path: string, isWindows: boolean): string {

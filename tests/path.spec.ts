@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -55,6 +55,53 @@ describe('POSIX lifecycle move', () => {
       expect(result.status).not.toBe(0)
       expect(readFileSync(source, 'utf8')).toBe('source')
       expect(readFileSync(destination, 'utf8')).toBe('destination')
+    } finally { rmSync(base, { recursive: true, force: true }) }
+  })
+
+  it.skipIf(process.platform === 'win32')('preserves the move failure when the source is missing', () => {
+    const base = mkdtempSync(join(tmpdir(), 'sm-move-'))
+    try {
+      const source = join(base, 'missing-source')
+      const destination = join(base, 'destination')
+
+      const result = spawnSync('/bin/sh', ['-c', moveNoClobberCommand(source, destination, false)])
+
+      expect(result.status).not.toBe(0)
+      expect(existsSync(destination)).toBe(false)
+    } finally { rmSync(base, { recursive: true, force: true }) }
+  })
+
+  it.skipIf(process.platform === 'win32')('detects and reverses a destination-directory race', () => {
+    const base = mkdtempSync(join(tmpdir(), 'sm-move-'))
+    try {
+      const source = join(base, 'source')
+      const destination = join(base, 'destination')
+      const fakeBin = join(base, 'bin')
+      const fakeMv = join(fakeBin, 'mv')
+      const raceMarker = join(base, 'race-triggered')
+      mkdirSync(fakeBin)
+      writeFileSync(source, 'source')
+      writeFileSync(fakeMv, `#!/bin/sh
+if [ ! -e "$RACE_MARKER" ]; then
+  : > "$RACE_MARKER"
+  mkdir "$RACE_DESTINATION"
+fi
+exec /bin/mv "$@"
+`)
+      chmodSync(fakeMv, 0o755)
+
+      const result = spawnSync('/bin/sh', ['-c', moveNoClobberCommand(source, destination, false)], {
+        env: {
+          ...process.env,
+          PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+          RACE_DESTINATION: destination,
+          RACE_MARKER: raceMarker,
+        },
+      })
+
+      expect(result.status).not.toBe(0)
+      expect(readFileSync(source, 'utf8')).toBe('source')
+      expect(existsSync(join(destination, 'source'))).toBe(false)
     } finally { rmSync(base, { recursive: true, force: true }) }
   })
 })

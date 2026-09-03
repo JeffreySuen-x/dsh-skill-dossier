@@ -1,4 +1,5 @@
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
@@ -99,6 +100,11 @@ async function post(route: Route, body: unknown, headers: Record<string, string>
   }
   await route.handler(request, response)
   return { status: response.statusCode, body: JSON.parse(responseBody) as any }
+}
+
+function runPosixCommand(request: any): { exitCode: number; stderr: { text: string } } {
+  const result = spawnSync('/bin/sh', ['-c', String(request?.command ?? '')], { encoding: 'utf8' })
+  return { exitCode: result.status ?? 1, stderr: { text: result.stderr } }
 }
 
 describe('single-package host activation', () => {
@@ -232,43 +238,54 @@ describe('single-package host activation', () => {
     expect(writes).toEqual([])
   })
 
-  it('moves an uninstalled skill back when the index commit fails', async () => {
-    const { ctx, routes, shellCommands } = hostContext({
-      skill: {
-        name: 'alpha',
-        description: 'test skill',
-        invocation: { modelInvocable: true, userInvocable: true },
-        source: 'custom',
-        provider: 'filesystem',
-        content: '# alpha',
-        path: '/workspace/skills/alpha/SKILL.md',
-      },
-      shellRun: async (request) => String(request?.command ?? '').startsWith('mv -f -- ')
-        ? { exitCode: 1, stderr: { text: 'commit failed' } }
-        : { exitCode: 0 },
-    })
-    apply(ctx as never)
+  it.skipIf(process.platform === 'win32')('moves an uninstalled skill back when the index commit fails', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'dsh-skill-manager-uninstall-'))
+    const skillDir = join(base, 'skills', 'alpha')
+    const skillPath = join(skillDir, 'SKILL.md')
+    mkdirSync(skillDir, { recursive: true })
+    writeFileSync(skillPath, '# alpha')
+    try {
+      const { ctx, routes, shellCommands } = hostContext({
+        cwd: base,
+        skill: {
+          name: 'alpha',
+          description: 'test skill',
+          invocation: { modelInvocable: true, userInvocable: true },
+          source: 'custom',
+          provider: 'filesystem',
+          content: '# alpha',
+          path: skillPath,
+        },
+        shellRun: async (request) => String(request?.command ?? '').startsWith('mv -f -- ')
+          ? { exitCode: 1, stderr: { text: 'commit failed' } }
+          : runPosixCommand(request),
+      })
+      apply(ctx as never)
 
-    const response = await post(routes.get('/api/skill-manager')!, {
-      method: 'uninstall',
-      args: { sessionId: 'session-1', name: 'alpha' },
-    })
+      const response = await post(routes.get('/api/skill-manager')!, {
+        method: 'uninstall',
+        args: { sessionId: 'session-1', name: 'alpha' },
+      })
 
-    const moves = shellCommands.filter((command) => command.includes('mv -n -- '))
-    expect(response.status).toBe(500)
-    expect(response.body.error).toContain('commit failed')
-    expect(moves).toHaveLength(2)
-    expect(moves[0]).toMatch(/mv -n -- '\/workspace\/skills\/alpha' '\/workspace\/skill-manager\/trash\/alpha-\d+'/)
-    expect(moves[1]).toMatch(/mv -n -- '\/workspace\/skill-manager\/trash\/alpha-\d+' '\/workspace\/skills\/alpha'/)
+      const moves = shellCommands.filter((command) => command.includes('mv -n -- '))
+      expect(response.status).toBe(500)
+      expect(response.body.error).toContain('commit failed')
+      expect(moves).toHaveLength(2)
+      expect(readFileSync(skillPath, 'utf8')).toBe('# alpha')
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
   })
 
-  it('moves a reinstalled skill back to trash when the index commit fails', async () => {
+  it.skipIf(process.platform === 'win32')('moves a reinstalled skill back to trash when the index commit fails', async () => {
     const base = mkdtempSync(join(tmpdir(), 'dsh-skill-manager-reinstall-'))
     const root = join(base, 'skills')
     const trashDir = join(base, 'skill-manager', 'trash')
     const trashedPath = join(trashDir, 'alpha-1')
     const originalPath = join(root, 'alpha')
+    mkdirSync(root, { recursive: true })
     mkdirSync(trashedPath, { recursive: true })
+    writeFileSync(join(trashedPath, 'SKILL.md'), '# alpha')
     try {
       const { ctx, routes, shellCommands } = hostContext({
         cwd: base,
@@ -280,7 +297,7 @@ describe('single-package host activation', () => {
         }),
         shellRun: async (request) => String(request?.command ?? '').startsWith('mv -f -- ')
           ? { exitCode: 1, stderr: { text: 'commit failed' } }
-          : { exitCode: 0 },
+          : runPosixCommand(request),
       })
       apply(ctx as never)
 
@@ -295,6 +312,8 @@ describe('single-package host activation', () => {
       expect(moves).toHaveLength(2)
       expect(moves[0]).toContain(`mv -n -- '${trashedPath}' '${originalPath}'`)
       expect(moves[1]).toContain(`mv -n -- '${originalPath}' '${trashedPath}'`)
+      expect(existsSync(originalPath)).toBe(false)
+      expect(readFileSync(join(trashedPath, 'SKILL.md'), 'utf8')).toBe('# alpha')
     } finally {
       rmSync(base, { recursive: true, force: true })
     }

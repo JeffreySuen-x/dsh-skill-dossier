@@ -183,12 +183,12 @@ export function apply(ctx: Context): void {
     return error instanceof Error ? error.message : String(error)
   }
 
-  async function rollbackMoveOrRethrow(
+  async function rollbackMoveAfterCommitFailure(
     operationError: unknown,
     source: string,
     destination: string,
     root: string,
-  ): Promise<never> {
+  ): Promise<void> {
     try {
       await runShell(moveNoClobberCommand(source, destination, IS_WINDOWS), root)
     } catch (rollbackError) {
@@ -196,7 +196,6 @@ export function apply(ctx: Context): void {
         `索引提交失败：${errorMessage(operationError)}；文件回滚失败：${errorMessage(rollbackError)}`,
       )
     }
-    throw operationError
   }
 
   const indexStore = createIndexStore({
@@ -238,9 +237,13 @@ export function apply(ctx: Context): void {
     }
   }
 
-  async function updateIndexOrReject<T>(cwd: string, mutate: (index: Awaited<ReturnType<typeof readIndex>>) => Promise<T>): Promise<T | { ok: false; error: string }> {
+  async function updateIndexOrReject<T>(
+    cwd: string,
+    mutate: (index: Awaited<ReturnType<typeof readIndex>>) => Promise<T>,
+    recoverWriteFailure?: (error: unknown) => void | Promise<void>,
+  ): Promise<T | { ok: false; error: string }> {
     try {
-      return await indexStore.update(cwd, mutate)
+      return await indexStore.update(cwd, mutate, recoverWriteFailure)
     } catch (error) {
       if (error instanceof IndexOperationRejected) return error.response
       throw error
@@ -818,19 +821,18 @@ export function apply(ctx: Context): void {
       const removedAt = Date.now()
       const trashedPath = join(trashDir, `${name}-${removedAt}`)
       let moved = false
-      try {
-        await indexStore.update(cwd, async (index) => {
+      await indexStore.update(
+        cwd,
+        async (index) => {
           await runShell(mkdirCommand(trashDir, IS_WINDOWS), entryInfo.root)
           await runShell(moveNoClobberCommand(entryInfo.entry, trashedPath, IS_WINDOWS), entryInfo.root)
           moved = true
           index.trash[name] = { name, originalPath: entryInfo.entry, trashedPath, root: entryInfo.root, removedAt }
-        })
-      } catch (error) {
-        if (moved) {
-          return rollbackMoveOrRethrow(error, trashedPath, entryInfo.entry, entryInfo.root)
-        }
-        throw error
-      }
+        },
+        async (error) => {
+          if (moved) await rollbackMoveAfterCommitFailure(error, trashedPath, entryInfo.entry, entryInfo.root)
+        },
+      )
       return { ok: true }
     },
 
@@ -841,8 +843,9 @@ export function apply(ctx: Context): void {
       const cwd = cwdOf(sessionId)
       if (cwd === undefined) return { ok: false, error: '无法确定当前工作目录' }
       let rollback: { source: string; destination: string; root: string } | undefined
-      try {
-        return await updateIndexOrReject(cwd, async (index) => {
+      return updateIndexOrReject(
+        cwd,
+        async (index) => {
           const record = index.trash[name]
           if (record === null || typeof record !== 'object') rejectIndexOperation('未找到该技能的停用记录')
           const { trashedPath, originalPath, root } = record
@@ -855,13 +858,13 @@ export function apply(ctx: Context): void {
           rollback = { source: originalPath, destination: trashedPath, root }
           delete index.trash[name]
           return { ok: true }
-        })
-      } catch (error) {
-        if (rollback !== undefined) {
-          return rollbackMoveOrRethrow(error, rollback.source, rollback.destination, rollback.root)
-        }
-        throw error
-      }
+        },
+        async (error) => {
+          if (rollback !== undefined) {
+            await rollbackMoveAfterCommitFailure(error, rollback.source, rollback.destination, rollback.root)
+          }
+        },
+      )
     },
 
     async deleteTrash(args) {

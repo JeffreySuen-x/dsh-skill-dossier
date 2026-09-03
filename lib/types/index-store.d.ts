@@ -37,7 +37,7 @@ export interface IndexStorage {
 }
 export interface IndexStore {
     read(cwd: string | undefined): Promise<ArchiveIndex>;
-    update<T>(cwd: string, mutate: (index: ArchiveIndex) => T | Promise<T>): Promise<T>;
+    update<T>(cwd: string, mutate: (index: ArchiveIndex) => T | Promise<T>, recoverWriteFailure?: (error: unknown) => void | Promise<void>): Promise<T>;
 }
 export declare function emptyArchiveIndex(): ArchiveIndex;
 export declare function parseArchiveIndex(text: string): ArchiveIndex;

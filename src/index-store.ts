@@ -42,7 +42,11 @@ export interface IndexStorage {
 
 export interface IndexStore {
   read(cwd: string | undefined): Promise<ArchiveIndex>
-  update<T>(cwd: string, mutate: (index: ArchiveIndex) => T | Promise<T>): Promise<T>
+  update<T>(
+    cwd: string,
+    mutate: (index: ArchiveIndex) => T | Promise<T>,
+    recoverWriteFailure?: (error: unknown) => void | Promise<void>,
+  ): Promise<T>
 }
 
 export function emptyArchiveIndex(): ArchiveIndex {
@@ -115,12 +119,17 @@ export function createIndexStore(storage: IndexStorage): IndexStore {
       await (barriers.get(key) ?? Promise.resolve())
       return load(cwd)
     },
-    async update(cwd, mutate) {
+    async update(cwd, mutate, recoverWriteFailure) {
       const key = await (storage.lockKey?.(cwd) ?? cwd)
       return enqueue(key, async () => {
         const index = await load(cwd)
         const result = await mutate(index)
-        await storage.writeAtomic(cwd, JSON.stringify(index, null, 2))
+        try {
+          await storage.writeAtomic(cwd, JSON.stringify(index, null, 2))
+        } catch (error) {
+          await recoverWriteFailure?.(error)
+          throw error
+        }
         return result
       })
     },

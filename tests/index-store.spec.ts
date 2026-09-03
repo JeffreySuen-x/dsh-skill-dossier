@@ -102,4 +102,50 @@ describe('index store', () => {
     await expect(store.update('/a', (index) => { index.skills.alpha = { name: 'alpha' } })).rejects.toThrow('replace failed')
     expect(JSON.parse(memory.files.get('/a')!)).toEqual({ version: 1, skills: {}, trash: {}, usage: {} })
   })
+
+  it('keeps write-failure recovery inside the workspace serial section', async () => {
+    const order: string[] = []
+    let stored = '{"version":1,"skills":{},"trash":{},"usage":{}}'
+    let failNextWrite = true
+    const store = createIndexStore({
+      read: async () => stored,
+      writeAtomic: async (_cwd, value) => {
+        if (failNextWrite) {
+          failNextWrite = false
+          order.push('write-failed')
+          throw new Error('replace failed')
+        }
+        order.push('write-succeeded')
+        stored = value
+      },
+    })
+
+    const first = store.update(
+      '/a',
+      (index) => {
+        order.push('first-mutate')
+        index.skills.alpha = { name: 'alpha' }
+      },
+      async () => {
+        order.push('recovery-start')
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        order.push('recovery-end')
+      },
+    )
+    const second = store.update('/a', (index) => {
+      order.push('second-mutate')
+      index.skills.beta = { name: 'beta' }
+    })
+
+    await expect(first).rejects.toThrow('replace failed')
+    await expect(second).resolves.toBeUndefined()
+    expect(order).toEqual([
+      'first-mutate',
+      'write-failed',
+      'recovery-start',
+      'recovery-end',
+      'second-mutate',
+      'write-succeeded',
+    ])
+  })
 })

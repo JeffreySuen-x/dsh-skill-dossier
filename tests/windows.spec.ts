@@ -47,8 +47,8 @@ describe('pwsh 命令生成（isWindows=true）', () => {
     expect(mkdirCommand('C:\\a[b]', true)).toBe("[System.IO.Directory]::CreateDirectory('C:\\a[b]') | Out-Null")
   })
 
-  it('move 用 LiteralPath 且目标冲突失败', () => {
-    expect(moveNoClobberCommand('C:\\s[r]c', 'C:\\d[s]t', true)).toBe("if (Test-Path -LiteralPath 'C:\\d[s]t') { throw 'destination exists' }; Move-Item -LiteralPath 'C:\\s[r]c' -Destination 'C:\\d[s]t' -ErrorAction Stop")
+  it('move 用 .NET 精确目标 API，不把已有目标当容器', () => {
+    expect(moveNoClobberCommand('C:\\s[r]c', 'C:\\d[s]t', true)).toBe("if ([System.IO.Directory]::Exists('C:\\s[r]c')) { [System.IO.Directory]::Move('C:\\s[r]c', 'C:\\d[s]t') } elseif ([System.IO.File]::Exists('C:\\s[r]c')) { [System.IO.File]::Move('C:\\s[r]c', 'C:\\d[s]t') } else { throw 'source missing' }")
   })
 
   it('remove 用 LiteralPath', () => {
@@ -71,7 +71,7 @@ describe('bash 命令生成（isWindows=false 回归）', () => {
     expect(mkdirCommand('/a b', false)).toBe("mkdir -p '/a b'")
     expect(moveNoClobberCommand('/s', '/d', false)).toContain("if [ -e '/d' ] || [ -L '/d' ]")
     expect(moveNoClobberCommand('/s', '/d', false)).toContain("mv -n -- '/s' '/d'")
-    expect(moveNoClobberCommand('/s', '/d', false)).toContain("[ ! -e '/s' ] && [ ! -L '/s' ]")
+    expect(moveNoClobberCommand('/s', '/d', false)).toContain("&& [ ! -e '/s' ] && [ ! -L '/s' ]")
     expect(removeRecursiveCommand('/x', false)).toBe("rm -rf -- '/x'")
     expect(atomicReplaceCommand('/a/temp', '/a/index.json', false)).toBe("mv -f -- '/a/temp' '/a/index.json'")
     expect(removeFileCommand('/a/temp', false)).toBe("rm -f -- '/a/temp'")

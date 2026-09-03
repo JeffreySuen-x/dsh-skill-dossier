@@ -40,6 +40,28 @@ describe('index store', () => {
     expect(memory.writes).toEqual(['/a', '/a'])
   })
 
+  it('serializes distinct cwd spellings that resolve to one physical workspace', async () => {
+    let text: string | undefined
+    const store = createIndexStore({
+      lockKey: async (cwd) => cwd.replace(/\/\.$/, ''),
+      read: async () => {
+        if (text === undefined) throw Object.assign(new Error('missing'), { code: 'ENOENT' })
+        return text
+      },
+      writeAtomic: async (_cwd, value) => { text = value },
+    })
+
+    await Promise.all([
+      store.update('/a', async (index) => {
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        index.skills.alpha = { name: 'alpha' }
+      }),
+      store.update('/a/.', (index) => { index.skills.beta = { name: 'beta' } }),
+    ])
+
+    expect((await store.read('/a')).skills).toEqual({ alpha: { name: 'alpha' }, beta: { name: 'beta' } })
+  })
+
   it('keeps workspaces independent', async () => {
     const memory = memoryStorage()
     const store = createIndexStore(memory.storage)

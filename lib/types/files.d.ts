@@ -30,5 +30,7 @@ export declare function moveNoClobberCommand(src: string, dst: string, isWindows
 export declare function removeRecursiveCommand(path: string, isWindows: boolean): string;
 /** Replace a file by renaming a same-directory temporary file over it. */
 export declare function atomicReplaceCommand(src: string, dst: string, isWindows: boolean): string;
+/** Remove one staging file without interpreting wildcard characters. */
+export declare function removeFileCommand(path: string, isWindows: boolean): string;
 export {};
 //# sourceMappingURL=files.d.ts.map

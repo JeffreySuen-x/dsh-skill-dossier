@@ -16,13 +16,13 @@
  */
 import { realpath } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
-import { isAbsolute, join, relative } from 'node:path'
+import { isAbsolute, join, relative, resolve as resolvePath } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { formatMatches, matchSkills, type SkillMatch, type SkillProfile } from './match.ts'
 import { DIRECTION_LABELS, detectDirections, isDirectionLabel } from './directions.ts'
 import { formatReview, reviewCandidates } from './freshness.ts'
 import { formatUsage, recordUsage, skillGestures } from './usage.ts'
-import { atomicReplaceCommand, fsEntryOf, isWithin, mkdirCommand, moveNoClobberCommand, removeRecursiveCommand, trashDirOf } from './files.ts'
+import { atomicReplaceCommand, fsEntryOf, isWithin, mkdirCommand, moveNoClobberCommand, removeFileCommand, removeRecursiveCommand, trashDirOf } from './files.ts'
 import { isCrossSiteRequest, readJsonBody, respondJson } from './http.ts'
 import { createIndexStore } from './index-store.ts'
 import { registerReportApi, type ReportAgentsLike, type ReportFsLike, type ReportSandboxPolicyLike, type ReportWebServerLike } from './report.ts'
@@ -180,6 +180,16 @@ export function apply(ctx: Context): void {
   }
 
   const indexStore = createIndexStore({
+    async lockKey(cwd) {
+      let canonical: string
+      try {
+        canonical = await realpath(cwd)
+      } catch (error) {
+        if ((error as { code?: unknown }).code !== 'ENOENT') throw error
+        canonical = resolvePath(cwd)
+      }
+      return IS_WINDOWS ? canonical.toLowerCase() : canonical
+    },
     async read(cwd) {
       const target = await fs.resolve(join(cwd, '.dsh', 'skill-manager', 'index.json'), { cwd })
       return fs.readText(target)
@@ -194,7 +204,7 @@ export function apply(ctx: Context): void {
         await fs.writeText(temporaryTarget, value)
         await runShell(atomicReplaceCommand(temporaryPath, targetPath, IS_WINDOWS), dir)
       } catch (error) {
-        try { await runShell(removeRecursiveCommand(temporaryPath, IS_WINDOWS), dir) } catch { /* best-effort temp cleanup */ }
+        try { await runShell(removeFileCommand(temporaryPath, IS_WINDOWS), dir) } catch { /* best-effort temp cleanup */ }
         throw error
       }
     },

@@ -79,3 +79,10 @@ export function atomicReplaceCommand(src: string, dst: string, isWindows: boolea
     ? `[System.IO.File]::Move(${quoteShellArg(src, true)}, ${quoteShellArg(dst, true)}, $true)`
     : `mv -f -- ${quoteShellArg(src, false)} ${quoteShellArg(dst, false)}`
 }
+
+/** Remove one staging file without interpreting wildcard characters. */
+export function removeFileCommand(path: string, isWindows: boolean): string {
+  return isWindows
+    ? `Remove-Item -Force -LiteralPath ${quoteShellArg(path, true)}`
+    : `rm -f -- ${quoteShellArg(path, false)}`
+}

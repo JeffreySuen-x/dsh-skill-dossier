@@ -183,7 +183,7 @@ describe('single-package host activation', () => {
     expect(response.status).toBe(500)
     expect(response.body.error).toContain('replace failed')
     expect(writes).toHaveLength(1)
-    expect(shellCommands.some((command) => command.startsWith('rm -rf -- '))).toBe(true)
+    expect(shellCommands.some((command) => command.startsWith('rm -f -- '))).toBe(true)
   })
 
   it('attempts temporary-file cleanup when staging the new index fails', async () => {
@@ -199,7 +199,7 @@ describe('single-package host activation', () => {
 
     expect(response.status).toBe(500)
     expect(response.body.error).toContain('stage failed')
-    expect(shellCommands.some((command) => command.startsWith('rm -rf -- '))).toBe(true)
+    expect(shellCommands.some((command) => command.startsWith('rm -f -- '))).toBe(true)
   })
 
   it('does not create or rewrite the index for a rejected lifecycle operation', async () => {

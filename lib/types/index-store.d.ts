@@ -31,6 +31,7 @@ export interface ArchiveIndex {
     usage: Record<string, UsageRecord>;
 }
 export interface IndexStorage {
+    lockKey?(cwd: string): string | Promise<string>;
     read(cwd: string): Promise<string>;
     writeAtomic(cwd: string, value: string): Promise<void>;
 }

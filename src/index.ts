@@ -77,7 +77,10 @@ interface SkillsLike {
   get(name: string, options?: unknown): Promise<DefinitionLike | undefined>
   register(skill: unknown): () => void
 }
-interface AgentLike { session: { header: { cwd: string } } }
+interface AgentLike {
+  session: { header: { cwd: string } }
+  ctx: Context
+}
 interface AgentsLike { get(id: string): AgentLike | undefined }
 interface FsLike {
   resolve(path: string, opts?: { cwd?: string }): Promise<unknown>
@@ -116,11 +119,41 @@ export function apply(ctx: Context): void {
   const webServer = ctx.get('webServer') as WebServerLike | undefined
   if (skills === undefined || agents === undefined || fs === undefined || shell === undefined || sandboxPolicy === undefined || tools === undefined || webServer === undefined) return
 
-  const owned = new Map<string, () => void>()
+  const owned = new Map<AgentLike, Map<string, () => void>>()
+  const temporaryBarriers = new WeakMap<AgentLike, Promise<void>>()
   ctx.effect(() => () => {
-    for (const dispose of owned.values()) dispose()
+    for (const registrations of owned.values()) {
+      for (const dispose of registrations.values()) dispose()
+    }
     owned.clear()
   })
+
+  function ownedBy(agent: AgentLike): Map<string, () => void> {
+    const existing = owned.get(agent)
+    if (existing !== undefined) return existing
+    const registrations = new Map<string, () => void>()
+    owned.set(agent, registrations)
+    agent.ctx.effect(() => () => {
+      if (owned.get(agent) === registrations) owned.delete(agent)
+    })
+    return registrations
+  }
+
+  function isOwned(sessionId: unknown, name: string): boolean {
+    const agent = agentOf(sessionId)
+    return agent !== undefined && owned.get(agent)?.has(name) === true
+  }
+
+  function enqueueTemporary<T>(agent: AgentLike, task: () => Promise<T>): Promise<T> {
+    const previous = temporaryBarriers.get(agent) ?? Promise.resolve()
+    const result = previous.then(task, task)
+    const barrier = result.then(() => undefined, () => undefined)
+    temporaryBarriers.set(agent, barrier)
+    void barrier.then(() => {
+      if (temporaryBarriers.get(agent) === barrier) temporaryBarriers.delete(agent)
+    })
+    return result
+  }
 
   function viewOptions(sessionId: unknown) {
     if (typeof sessionId !== 'string') return {}
@@ -701,7 +734,7 @@ export function apply(ctx: Context): void {
           userInvocable: s.invocation.userInvocable === true,
           source: s.source,
           provider: s.provider,
-          owned: owned.has(s.name),
+          owned: isOwned(sessionId, s.name),
         })),
         index,
       }
@@ -724,7 +757,7 @@ export function apply(ctx: Context): void {
         path: typeof skill.path === 'string' ? skill.path : null,
         modelInvocable: skill.invocation.modelInvocable === true,
         userInvocable: skill.invocation.userInvocable === true,
-        owned: owned.has(skill.name),
+        owned: isOwned(sessionId, skill.name),
         profile,
       }
     },
@@ -737,33 +770,49 @@ export function apply(ctx: Context): void {
       if (!NAME_RE.test(name)) return { ok: false, error: '名称必须是 kebab-case（小写字母、数字、连字符）' }
       if (description === '') return { ok: false, error: '描述不能为空' }
       if (content.trim() === '') return { ok: false, error: '内容不能为空' }
-      const opts = viewOptions(typeof args.sessionId === 'string' ? args.sessionId : undefined)
-      const existing = (await skills.list(opts)).some((s) => s.name === name)
-      if (existing && !owned.has(name)) return { ok: false, error: `同名技能 "${name}" 已存在` }
-      const previous = owned.get(name)
-      if (previous !== undefined) { previous(); owned.delete(name) }
-      const dispose = skills.register({
-        name,
-        description,
-        ...(typeof args.whenToUse === 'string' && args.whenToUse.trim() !== '' ? { whenToUse: args.whenToUse.trim() } : {}),
-        content,
-        source: 'custom',
-        invocation: {
-          modelInvocable: args.modelInvocable !== false,
-          userInvocable: args.userInvocable !== false,
-        },
+      const sessionId = typeof args.sessionId === 'string' ? args.sessionId : undefined
+      const agent = agentOf(sessionId)
+      if (agent === undefined) return { ok: false, error: '当前会话没有活跃的 agent' }
+      return enqueueTemporary(agent, async () => {
+        const scopedSkills = agent.ctx.get('skills') as SkillsLike | undefined
+        if (scopedSkills === undefined) return { ok: false, error: '当前会话的 skills 服务不可用' }
+        const registrations = ownedBy(agent)
+        const existing = (await skills.list({ scope: agent as unknown, cwd: agent.session.header.cwd })).some((s) => s.name === name)
+        if (existing && !registrations.has(name)) return { ok: false, error: `同名技能 "${name}" 已存在` }
+        const current = registrations.get(name)
+        if (current !== undefined) {
+          current()
+          registrations.delete(name)
+        }
+        const dispose = scopedSkills.register({
+          name,
+          description,
+          ...(typeof args.whenToUse === 'string' && args.whenToUse.trim() !== '' ? { whenToUse: args.whenToUse.trim() } : {}),
+          content,
+          source: 'custom',
+          invocation: {
+            modelInvocable: args.modelInvocable !== false,
+            userInvocable: args.userInvocable !== false,
+          },
+        })
+        registrations.set(name, dispose)
+        return { ok: true }
       })
-      owned.set(name, dispose)
-      return { ok: true }
     },
 
     async unregister(args) {
       if (args === null || typeof args !== 'object' || typeof args.name !== 'string') return { ok: false, error: '参数无效' }
-      const dispose = owned.get(args.name)
-      if (dispose === undefined) return { ok: false, error: '该技能不是本插件注册的临时技能' }
-      dispose()
-      owned.delete(args.name)
-      return { ok: true }
+      const sessionId = typeof args.sessionId === 'string' ? args.sessionId : undefined
+      const agent = agentOf(sessionId)
+      if (agent === undefined) return { ok: false, error: '当前会话没有活跃的 agent' }
+      return enqueueTemporary(agent, async () => {
+        const registrations = owned.get(agent)
+        const dispose = registrations?.get(args.name)
+        if (dispose === undefined) return { ok: false, error: '该技能不是本会话注册的临时技能' }
+        dispose()
+        registrations!.delete(args.name)
+        return { ok: true }
+      })
     },
 
     async invoke(args) {

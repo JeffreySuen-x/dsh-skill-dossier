@@ -73,11 +73,18 @@ export function moveNoClobberCommand(src: string, dst: string, isWindows: boolea
     return `if ([System.IO.Directory]::Exists(${source})) { [System.IO.Directory]::Move(${source}, ${destination}) } elseif ([System.IO.File]::Exists(${source})) { [System.IO.File]::Move(${source}, ${destination}) } else { throw 'source missing' }`
   }
   const nestedPath = path.posix.join(dst, path.posix.basename(src))
+  const destinationParentPath = path.posix.dirname(dst)
   const nested = quoteShellArg(nestedPath, false)
   const sourceIdentity = posixIdentityCommand(src)
+  const destinationParentIdentity = posixIdentityCommand(destinationParentPath)
   const destinationIdentity = posixIdentityCommand(dst)
   const nestedIdentity = posixIdentityCommand(nestedPath)
+  // trash 与 skill root 预期同盘；跨设备 mv 会 copy+unlink 并改变 inode，
+  // 因此在移动前安全拒绝，避免把合法复制误判为竞态后留下 orphan。
   return `source_id=$(${sourceIdentity}) || { echo 'source missing' >&2; exit 18; }; `
+    + `destination_parent_id=$(${destinationParentIdentity}) || { echo 'destination parent missing' >&2; exit 18; }; `
+    + `source_device=\${source_id%%:*}; destination_device=\${destination_parent_id%%:*}; `
+    + `if [ "$source_device" != "$destination_device" ]; then echo 'cross-device move is not supported' >&2; exit 18; fi; `
     + `if [ -e ${destination} ] || [ -L ${destination} ]; then echo 'destination exists' >&2; exit 17; fi; `
     + `mv -n -- ${source} ${destination} || exit $?; `
     + `destination_id=$(${destinationIdentity}) || destination_id=''; `

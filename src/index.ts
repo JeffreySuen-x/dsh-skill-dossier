@@ -179,6 +179,26 @@ export function apply(ctx: Context): void {
     }
   }
 
+  function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error)
+  }
+
+  async function rollbackMoveOrRethrow(
+    operationError: unknown,
+    source: string,
+    destination: string,
+    root: string,
+  ): Promise<never> {
+    try {
+      await runShell(moveNoClobberCommand(source, destination, IS_WINDOWS), root)
+    } catch (rollbackError) {
+      throw new Error(
+        `索引提交失败：${errorMessage(operationError)}；文件回滚失败：${errorMessage(rollbackError)}`,
+      )
+    }
+    throw operationError
+  }
+
   const indexStore = createIndexStore({
     async lockKey(cwd) {
       let canonical: string
@@ -797,11 +817,20 @@ export function apply(ctx: Context): void {
       const trashDir = trashDirOf(entryInfo.root)
       const removedAt = Date.now()
       const trashedPath = join(trashDir, `${name}-${removedAt}`)
-      await indexStore.update(cwd, async (index) => {
-        await runShell(mkdirCommand(trashDir, IS_WINDOWS), entryInfo.root)
-        await runShell(moveNoClobberCommand(entryInfo.entry, trashedPath, IS_WINDOWS), entryInfo.root)
-        index.trash[name] = { name, originalPath: entryInfo.entry, trashedPath, root: entryInfo.root, removedAt }
-      })
+      let moved = false
+      try {
+        await indexStore.update(cwd, async (index) => {
+          await runShell(mkdirCommand(trashDir, IS_WINDOWS), entryInfo.root)
+          await runShell(moveNoClobberCommand(entryInfo.entry, trashedPath, IS_WINDOWS), entryInfo.root)
+          moved = true
+          index.trash[name] = { name, originalPath: entryInfo.entry, trashedPath, root: entryInfo.root, removedAt }
+        })
+      } catch (error) {
+        if (moved) {
+          return rollbackMoveOrRethrow(error, trashedPath, entryInfo.entry, entryInfo.root)
+        }
+        throw error
+      }
       return { ok: true }
     },
 
@@ -811,19 +840,28 @@ export function apply(ctx: Context): void {
       const sessionId = typeof args.sessionId === 'string' ? args.sessionId : undefined
       const cwd = cwdOf(sessionId)
       if (cwd === undefined) return { ok: false, error: '无法确定当前工作目录' }
-      return updateIndexOrReject(cwd, async (index) => {
-        const record = index.trash[name]
-        if (record === null || typeof record !== 'object') rejectIndexOperation('未找到该技能的停用记录')
-        const { trashedPath, originalPath, root } = record
-        if (typeof trashedPath !== 'string' || typeof originalPath !== 'string' || typeof root !== 'string' || trashedPath === '' || originalPath === '' || root === '') {
-          rejectIndexOperation('停用记录损坏')
+      let rollback: { source: string; destination: string; root: string } | undefined
+      try {
+        return await updateIndexOrReject(cwd, async (index) => {
+          const record = index.trash[name]
+          if (record === null || typeof record !== 'object') rejectIndexOperation('未找到该技能的停用记录')
+          const { trashedPath, originalPath, root } = record
+          if (typeof trashedPath !== 'string' || typeof originalPath !== 'string' || typeof root !== 'string' || trashedPath === '' || originalPath === '' || root === '') {
+            rejectIndexOperation('停用记录损坏')
+          }
+          if (await realpathWithin(trashedPath, trashDirOf(root)) !== true) rejectIndexOperation('停用记录路径异常，拒绝操作')
+          if (!isWithin(originalPath, root)) rejectIndexOperation('停用记录路径异常，拒绝操作')
+          await runShell(moveNoClobberCommand(trashedPath, originalPath, IS_WINDOWS), root)
+          rollback = { source: originalPath, destination: trashedPath, root }
+          delete index.trash[name]
+          return { ok: true }
+        })
+      } catch (error) {
+        if (rollback !== undefined) {
+          return rollbackMoveOrRethrow(error, rollback.source, rollback.destination, rollback.root)
         }
-        if (await realpathWithin(trashedPath, trashDirOf(root)) !== true) rejectIndexOperation('停用记录路径异常，拒绝操作')
-        if (!isWithin(originalPath, root)) rejectIndexOperation('停用记录路径异常，拒绝操作')
-        await runShell(moveNoClobberCommand(trashedPath, originalPath, IS_WINDOWS), root)
-        delete index.trash[name]
-        return { ok: true }
-      })
+        throw error
+      }
     },
 
     async deleteTrash(args) {

@@ -43,16 +43,16 @@ describe('pwsh 命令生成（isWindows=true）', () => {
     expect(quoteShellArg("it's", true)).toBe("'it''s'")
   })
 
-  it('mkdir 用 New-Item', () => {
-    expect(mkdirCommand('C:\\a b', true)).toBe("New-Item -ItemType Directory -Force -Path 'C:\\a b' | Out-Null")
+  it('mkdir 用 .NET 字面路径', () => {
+    expect(mkdirCommand('C:\\a[b]', true)).toBe("[System.IO.Directory]::CreateDirectory('C:\\a[b]') | Out-Null")
   })
 
-  it('move 用 Move-Item（无覆盖）', () => {
-    expect(moveNoClobberCommand('C:\\src', 'C:\\dst', true)).toBe("Move-Item -Path 'C:\\src' -Destination 'C:\\dst'")
+  it('move 用 LiteralPath 且目标冲突失败', () => {
+    expect(moveNoClobberCommand('C:\\s[r]c', 'C:\\d[s]t', true)).toBe("if (Test-Path -LiteralPath 'C:\\d[s]t') { throw 'destination exists' }; Move-Item -LiteralPath 'C:\\s[r]c' -Destination 'C:\\d[s]t' -ErrorAction Stop")
   })
 
-  it('remove 用 Remove-Item', () => {
-    expect(removeRecursiveCommand('C:\\x', true)).toBe("Remove-Item -Recurse -Force -Path 'C:\\x'")
+  it('remove 用 LiteralPath', () => {
+    expect(removeRecursiveCommand('C:\\x[y]', true)).toBe("Remove-Item -Recurse -Force -LiteralPath 'C:\\x[y]'")
   })
 
   it('原子替换用 .NET 字面路径重载', () => {
@@ -69,7 +69,9 @@ describe('pwsh 命令生成（isWindows=true）', () => {
 describe('bash 命令生成（isWindows=false 回归）', () => {
   it('仍输出 POSIX 命令', () => {
     expect(mkdirCommand('/a b', false)).toBe("mkdir -p '/a b'")
-    expect(moveNoClobberCommand('/s', '/d', false)).toBe("mv -n '/s' '/d'")
+    expect(moveNoClobberCommand('/s', '/d', false)).toContain("if [ -e '/d' ] || [ -L '/d' ]")
+    expect(moveNoClobberCommand('/s', '/d', false)).toContain("mv -n -- '/s' '/d'")
+    expect(moveNoClobberCommand('/s', '/d', false)).toContain("[ ! -e '/s' ] && [ ! -L '/s' ]")
     expect(removeRecursiveCommand('/x', false)).toBe("rm -rf -- '/x'")
     expect(atomicReplaceCommand('/a/temp', '/a/index.json', false)).toBe("mv -f -- '/a/temp' '/a/index.json'")
     expect(removeFileCommand('/a/temp', false)).toBe("rm -f -- '/a/temp'")

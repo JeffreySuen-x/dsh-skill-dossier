@@ -1,8 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { isWithin } from '../src/files.ts'
+import { isWithin, moveNoClobberCommand } from '../src/files.ts'
 import { realpathWithin } from '../src/index.ts'
 
 describe('isWithin (lexical path guard)', () => {
@@ -22,6 +23,39 @@ describe('isWithin (lexical path guard)', () => {
 
   it('rejects a sibling whose name shares the prefix', () => {
     expect(isWithin('/root/.dsh/skill-manager/trash-evil/x', trash)).toBe(false)
+  })
+})
+
+describe('POSIX lifecycle move', () => {
+  it.skipIf(process.platform === 'win32')('moves when the destination is absent', () => {
+    const base = mkdtempSync(join(tmpdir(), 'sm-move-'))
+    try {
+      const source = join(base, 'source')
+      const destination = join(base, 'destination')
+      writeFileSync(source, 'source')
+
+      const result = spawnSync('/bin/sh', ['-c', moveNoClobberCommand(source, destination, false)])
+
+      expect(result.status).toBe(0)
+      expect(existsSync(source)).toBe(false)
+      expect(readFileSync(destination, 'utf8')).toBe('source')
+    } finally { rmSync(base, { recursive: true, force: true }) }
+  })
+
+  it.skipIf(process.platform === 'win32')('fails without overwriting when the destination exists', () => {
+    const base = mkdtempSync(join(tmpdir(), 'sm-move-'))
+    try {
+      const source = join(base, 'source')
+      const destination = join(base, 'destination')
+      writeFileSync(source, 'source')
+      writeFileSync(destination, 'destination')
+
+      const result = spawnSync('/bin/sh', ['-c', moveNoClobberCommand(source, destination, false)])
+
+      expect(result.status).not.toBe(0)
+      expect(readFileSync(source, 'utf8')).toBe('source')
+      expect(readFileSync(destination, 'utf8')).toBe('destination')
+    } finally { rmSync(base, { recursive: true, force: true }) }
   })
 })
 

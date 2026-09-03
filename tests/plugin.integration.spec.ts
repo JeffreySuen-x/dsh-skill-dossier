@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { describe, expect, it } from 'vitest'
 import { apply, inject } from '../src/index.ts'
@@ -14,21 +17,32 @@ function currentDateKey(): string {
 }
 
 function hostContext(options: {
+  cwd?: string
   listDir?: () => Promise<Array<{ name?: string; path?: string }>>
   writeText?: (target: unknown, content: string) => Promise<void>
   followup?: (message: unknown) => void
   indexText?: string
   indexReadError?: Error
   shellRun?: (request: any) => Promise<{ exitCode: number; stderr?: { text?: string } }>
+  skill?: {
+    name: string
+    description: string
+    invocation: { modelInvocable: boolean; userInvocable: boolean }
+    source: string
+    provider: string
+    content: string
+    path?: string
+  }
 } = {}) {
   const routes = new Map<string, Route>()
   const services = new Map<string, unknown>()
   const today = currentDateKey()
   const shellCommands: string[] = []
+  const cwd = options.cwd ?? '/workspace'
 
   services.set('skills', {
-    list: async () => [],
-    get: async () => undefined,
+    list: async () => options.skill === undefined ? [] : [options.skill],
+    get: async (name: string) => name === options.skill?.name ? options.skill : undefined,
     register: () => () => undefined,
   })
   services.set('tools', { register: () => () => undefined })
@@ -41,7 +55,7 @@ function hostContext(options: {
   })
   services.set('agents', {
     get: (id: string) => id === 'session-1'
-      ? { session: { header: { cwd: '/workspace' } }, followup: options.followup ?? (() => undefined) }
+      ? { session: { header: { cwd } }, followup: options.followup ?? (() => undefined) }
       : undefined,
   })
   services.set('fs', {
@@ -64,7 +78,7 @@ function hostContext(options: {
       return options.shellRun === undefined ? { exitCode: 0 } : options.shellRun(request)
     },
   })
-  services.set('sandboxPolicy', { workspaceRoot: '/workspace', resolve: () => ({}) })
+  services.set('sandboxPolicy', { workspaceRoot: cwd, resolve: () => ({}) })
 
   const ctx = {
     get(name: string) { return services.get(name) },
@@ -216,6 +230,108 @@ describe('single-package host activation', () => {
 
     expect(response).toEqual({ status: 200, body: { ok: false, error: '未找到该技能的停用记录' } })
     expect(writes).toEqual([])
+  })
+
+  it('moves an uninstalled skill back when the index commit fails', async () => {
+    const { ctx, routes, shellCommands } = hostContext({
+      skill: {
+        name: 'alpha',
+        description: 'test skill',
+        invocation: { modelInvocable: true, userInvocable: true },
+        source: 'custom',
+        provider: 'filesystem',
+        content: '# alpha',
+        path: '/workspace/skills/alpha/SKILL.md',
+      },
+      shellRun: async (request) => String(request?.command ?? '').startsWith('mv -f -- ')
+        ? { exitCode: 1, stderr: { text: 'commit failed' } }
+        : { exitCode: 0 },
+    })
+    apply(ctx as never)
+
+    const response = await post(routes.get('/api/skill-manager')!, {
+      method: 'uninstall',
+      args: { sessionId: 'session-1', name: 'alpha' },
+    })
+
+    const moves = shellCommands.filter((command) => command.includes('mv -n -- '))
+    expect(response.status).toBe(500)
+    expect(response.body.error).toContain('commit failed')
+    expect(moves).toHaveLength(2)
+    expect(moves[0]).toMatch(/mv -n -- '\/workspace\/skills\/alpha' '\/workspace\/skill-manager\/trash\/alpha-\d+'/)
+    expect(moves[1]).toMatch(/mv -n -- '\/workspace\/skill-manager\/trash\/alpha-\d+' '\/workspace\/skills\/alpha'/)
+  })
+
+  it('moves a reinstalled skill back to trash when the index commit fails', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'dsh-skill-manager-reinstall-'))
+    const root = join(base, 'skills')
+    const trashDir = join(base, 'skill-manager', 'trash')
+    const trashedPath = join(trashDir, 'alpha-1')
+    const originalPath = join(root, 'alpha')
+    mkdirSync(trashedPath, { recursive: true })
+    try {
+      const { ctx, routes, shellCommands } = hostContext({
+        cwd: base,
+        indexText: JSON.stringify({
+          version: 1,
+          skills: {},
+          usage: {},
+          trash: { alpha: { name: 'alpha', originalPath, trashedPath, root, removedAt: 1 } },
+        }),
+        shellRun: async (request) => String(request?.command ?? '').startsWith('mv -f -- ')
+          ? { exitCode: 1, stderr: { text: 'commit failed' } }
+          : { exitCode: 0 },
+      })
+      apply(ctx as never)
+
+      const response = await post(routes.get('/api/skill-manager')!, {
+        method: 'reinstall',
+        args: { sessionId: 'session-1', name: 'alpha' },
+      })
+
+      const moves = shellCommands.filter((command) => command.includes('mv -n -- '))
+      expect(response.status).toBe(500)
+      expect(response.body.error).toContain('commit failed')
+      expect(moves).toHaveLength(2)
+      expect(moves[0]).toContain(`mv -n -- '${trashedPath}' '${originalPath}'`)
+      expect(moves[1]).toContain(`mv -n -- '${originalPath}' '${trashedPath}'`)
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
+  })
+
+  it('reports both index and rollback errors when lifecycle recovery fails', async () => {
+    let lifecycleMoves = 0
+    const { ctx, routes } = hostContext({
+      skill: {
+        name: 'alpha',
+        description: 'test skill',
+        invocation: { modelInvocable: true, userInvocable: true },
+        source: 'custom',
+        provider: 'filesystem',
+        content: '# alpha',
+        path: '/workspace/skills/alpha/SKILL.md',
+      },
+      shellRun: async (request) => {
+        const command = String(request?.command ?? '')
+        if (command.startsWith('mv -f -- ')) return { exitCode: 1, stderr: { text: 'commit failed' } }
+        if (command.includes('mv -n -- ')) {
+          lifecycleMoves += 1
+          if (lifecycleMoves === 2) return { exitCode: 1, stderr: { text: 'rollback failed' } }
+        }
+        return { exitCode: 0 }
+      },
+    })
+    apply(ctx as never)
+
+    const response = await post(routes.get('/api/skill-manager')!, {
+      method: 'uninstall',
+      args: { sessionId: 'session-1', name: 'alpha' },
+    })
+
+    expect(response.status).toBe(500)
+    expect(response.body.error).toContain('commit failed')
+    expect(response.body.error).toContain('rollback failed')
   })
 
   it('generates monthly data, exports both formats, and reviews the actual brief contract', async () => {

@@ -57,19 +57,21 @@ export function quoteShellArg(value: string, isWindows: boolean): string {
 
 export function mkdirCommand(dir: string, isWindows: boolean): string {
   return isWindows
-    ? `New-Item -ItemType Directory -Force -Path ${quoteShellArg(dir, isWindows)} | Out-Null`
+    ? `[System.IO.Directory]::CreateDirectory(${quoteShellArg(dir, true)}) | Out-Null`
     : `mkdir -p ${quoteShellArg(dir, isWindows)}`
 }
 
 export function moveNoClobberCommand(src: string, dst: string, isWindows: boolean): string {
+  const source = quoteShellArg(src, isWindows)
+  const destination = quoteShellArg(dst, isWindows)
   return isWindows
-    ? `Move-Item -Path ${quoteShellArg(src, isWindows)} -Destination ${quoteShellArg(dst, isWindows)}`
-    : `mv -n ${quoteShellArg(src, isWindows)} ${quoteShellArg(dst, isWindows)}`
+    ? `if (Test-Path -LiteralPath ${destination}) { throw 'destination exists' }; Move-Item -LiteralPath ${source} -Destination ${destination} -ErrorAction Stop`
+    : `if [ -e ${destination} ] || [ -L ${destination} ]; then echo 'destination exists' >&2; exit 17; fi; mv -n -- ${source} ${destination}; [ ! -e ${source} ] && [ ! -L ${source} ]`
 }
 
 export function removeRecursiveCommand(path: string, isWindows: boolean): string {
   return isWindows
-    ? `Remove-Item -Recurse -Force -Path ${quoteShellArg(path, isWindows)}`
+    ? `Remove-Item -Recurse -Force -LiteralPath ${quoteShellArg(path, true)}`
     : `rm -rf -- ${quoteShellArg(path, isWindows)}`
 }
 

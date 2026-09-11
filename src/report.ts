@@ -116,6 +116,29 @@ export function pickDailyDate(allDates: string[], today: string): { date: string
   return { date: latest, fallbackFrom: latest === '' ? '' : today }
 }
 
+/** 当周（周一~周日）的 7 个日期；今天不在有数据的周里就回退到最近一个有数据的周。 */
+export function pickWeek(allDates: string[], today: string): { start: string; end: string; dates: string[]; fallbackFrom: string } {
+  const week = (day: string): string[] => {
+    const base = new Date(`${day}T00:00:00`)
+    const weekday = (base.getDay() + 6) % 7 // 周一=0
+    const start = new Date(base)
+    start.setDate(base.getDate() - weekday)
+    return Array.from({ length: 7 }, (_, offset) => {
+      const cursor = new Date(start)
+      cursor.setDate(start.getDate() + offset)
+      return `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}-${String(cursor.getDate()).padStart(2, '0')}`
+    })
+  }
+  const current = week(today)
+  if (allDates.some((date) => current.includes(date))) {
+    return { start: current[0]!, end: current[6]!, dates: current, fallbackFrom: '' }
+  }
+  const latest = allDates.at(-1)
+  if (latest === undefined) return { start: current[0]!, end: current[6]!, dates: current, fallbackFrom: '' }
+  const fallback = week(latest)
+  return { start: fallback[0]!, end: fallback[6]!, dates: fallback, fallbackFrom: today }
+}
+
 export function pickMonth(allDates: string[], currentMonth: string): { month: string; fallbackMonth: string; dates: string[] } {
   const inMonth = allDates.filter((date) => date.startsWith(currentMonth))
   if (inMonth.length > 0) return { month: currentMonth, fallbackMonth: '', dates: inMonth }
@@ -123,51 +146,6 @@ export function pickMonth(allDates: string[], currentMonth: string): { month: st
   if (latest === undefined) return { month: currentMonth, fallbackMonth: '', dates: [] }
   const month = latest.slice(0, 7)
   return { month, fallbackMonth: month, dates: allDates.filter((date) => date.startsWith(month)) }
-}
-
-export function toMarkdown(data: any, view: 'daily' | 'monthly'): string {
-  const lines: string[] = []
-  if (view === 'monthly') {
-    lines.push(`# 月度归纳 ${String(data.month ?? '')}`, '', '## 按日栏式', '')
-    lines.push('| 日期 | 项目 | 进度 | 待办 | 问题 |', '|---|---|---|---|---|')
-    for (const day of data.days ?? []) {
-      lines.push(`| ${tableCell(day.date)} | ${tableCell((day.projects ?? []).join('、'))} | ${tableCell((day.progress ?? []).join('；'))} | ${tableCell((day.todo ?? []).join('；'))} | ${tableCell((day.issues ?? []).join('；'))} |`)
-    }
-    lines.push('', '## 跨日项目汇总')
-    for (const project of data.projects ?? []) {
-      lines.push('', `### ${String(project.name ?? '')}`)
-      if (project.purpose) lines.push(`- 作用：${String(project.purpose)}`)
-      if (project.impl) lines.push(`- 实现：${String(project.impl)}`)
-      appendItems(lines, '累计进度', project.progress, '（暂无）')
-      appendItems(lines, '待办', project.todo, '（无）')
-      appendItems(lines, '问题', project.issues, '（无）')
-    }
-  } else {
-    lines.push(`# 每日简报 ${String(data.date ?? '')}`, '')
-    if ((data.projects ?? []).length === 0) {
-      lines.push(`（无记录，按 brief skill 维护 reporter/brief/${String(data.date ?? '')}.md）`)
-    }
-    for (const [index, project] of (data.projects ?? []).entries()) {
-      lines.push('', `${index + 1}、${String(project.name ?? '')}`)
-      if (project.purpose) lines.push(`  作用：${String(project.purpose)}`)
-      if (project.impl) lines.push(`  实现：${String(project.impl)}`)
-      appendItems(lines, '今日进度', project.progress, '（暂无）', '  ')
-      appendItems(lines, '待办', project.todo, '（无）', '  ')
-      appendItems(lines, '问题', project.issues, '（无）', '  ')
-    }
-  }
-  return lines.join('\n')
-}
-
-function tableCell(value: unknown): string {
-  return String(value ?? '').replaceAll('|', '&#124;').replace(/\r?\n/g, '<br>')
-}
-
-function appendItems(lines: string[], label: string, values: string[] | undefined, empty: string, prefix = '- '): void {
-  lines.push(`${prefix}${label}：`)
-  const items = values ?? []
-  if (items.length === 0) lines.push(`${prefix}${empty}`)
-  else items.forEach((item, index) => lines.push(`${prefix}${index + 1}、${item}`))
 }
 
 function localDateKey(): string {
@@ -223,72 +201,126 @@ export function registerReportApi(ctx: EffectContextLike, deps: ReportDependenci
     }).sort()
   }
 
+  /** 区间内每个项目的现状（进度只保留最新一句，待办/难点取最后一天看到的）。 */
+  interface RangeProject {
+    name: string
+    purpose: string
+    progress: string
+    todo: string[]
+    issues: string[]
+    days: string[]
+  }
+
+  async function readRange(cwd: string, dates: string[]) {
+    const days: Array<{ date: string; projects: string[] }> = []
+    const projects = new Map<string, RangeProject>()
+    const missing: string[] = []
+    for (const date of dates) {
+      let result: Awaited<ReturnType<typeof readBrief>>
+      try {
+        result = await readBrief(cwd, date)
+      } catch {
+        missing.push(date)
+        continue
+      }
+      days.push({ date, projects: result.projects.map((project) => project.name) })
+      for (const project of result.projects) {
+        const aggregate = projects.get(project.name)
+          ?? { name: project.name, purpose: '', progress: '', todo: [], issues: [], days: [] }
+        if (aggregate.purpose === '' && project.purpose !== '') aggregate.purpose = project.purpose
+        const latest = project.progress.at(-1)
+        if (latest !== undefined) aggregate.progress = latest
+        aggregate.todo = project.todo
+        aggregate.issues = project.issues
+        aggregate.days.push(date)
+        projects.set(project.name, aggregate)
+      }
+    }
+    return { days, projects: [...projects.values()], missing }
+  }
+
   async function generateDaily(args: any) {
     const cwd = cwdOf(args?.sessionId)
     const today = localDateKey()
     const emptyStats = { projects: 0, progress: 0, todo: 0, issues: 0 }
     const source = `${config.dataRoot}/${config.briefDir}/`
-    if (cwd === '') return { date: today, projects: [], stats: emptyStats, source, lastError: '无法确定工作区目录' }
+    if (cwd === '') return { scope: 'daily', date: today, projects: [], stats: emptyStats, source, lastError: '无法确定工作区目录' }
     try {
       const pick = pickDailyDate(await listBriefDates(cwd), today)
-      if (pick.date === '') return { date: today, projects: [], stats: emptyStats, source, lastError: '' }
+      if (pick.date === '') return { scope: 'daily', date: today, projects: [], stats: emptyStats, source, lastError: '' }
       const result = await readBrief(cwd, pick.date)
-      return { date: result.date, projects: result.projects, stats: statsOf(result.projects), source: result.path, lastError: '', fallbackFrom: pick.fallbackFrom }
+      return {
+        scope: 'daily',
+        date: result.date,
+        projects: result.projects,
+        stats: statsOf(result.projects),
+        source: result.path,
+        lastError: '',
+        fallbackFrom: pick.fallbackFrom,
+      }
     } catch (error) {
-      return { date: today, projects: [], stats: emptyStats, source, lastError: errorMessage(error) }
+      return { scope: 'daily', date: today, projects: [], stats: emptyStats, source, lastError: errorMessage(error) }
     }
   }
 
-  async function generateMonthly(args: any) {
+  /** 周报 / 月报共用：给出区间内每天都列出项目，供甘特图与现状卡共用。 */
+  async function generateRange(args: any, scope: 'weekly' | 'monthly') {
     const cwd = cwdOf(args?.sessionId)
-    const currentMonth = localDateKey().slice(0, 7)
     const source = `${config.dataRoot}/${config.briefDir}/`
-    if (cwd === '') return { month: currentMonth, days: [], projects: [], source, lastError: '无法确定工作区目录', fallbackMonth: '' }
-    let dates: string[] = []
+    const today = localDateKey()
+    const empty = { scope, label: '', start: today, end: today, dates: [], days: [], projects: [], source, lastError: '' }
+    if (cwd === '') return { ...empty, lastError: '无法确定工作区目录' }
+    let allDates: string[]
     try {
-      dates = await listBriefDates(cwd)
+      allDates = await listBriefDates(cwd)
     } catch (error) {
-      return { month: currentMonth, days: [], projects: [], source, lastError: errorMessage(error), fallbackMonth: '' }
+      return { ...empty, lastError: errorMessage(error) }
     }
-    const pick = pickMonth(dates, currentMonth)
-    const days: Array<{ date: string; projects: string[]; progress: string[]; todo: string[]; issues: string[] }> = []
-    const projects = new Map<string, ReportProject>()
-    const skipped: string[] = []
-    for (const date of pick.dates) {
-      try {
-        const result = await readBrief(cwd, date)
-        days.push({
-          date,
-          projects: result.projects.map((project) => project.name),
-          progress: result.projects.flatMap((project) => project.progress),
-          todo: result.projects.flatMap((project) => project.todo),
-          issues: result.projects.flatMap((project) => project.issues),
-        })
-        for (const project of result.projects) {
-          const aggregate = projects.get(project.name) ?? { name: project.name, purpose: project.purpose, impl: project.impl, progress: [], todo: [], issues: [] }
-          if (aggregate.purpose === '' && project.purpose !== '') aggregate.purpose = project.purpose
-          if (aggregate.impl === '' && project.impl !== '') aggregate.impl = project.impl
-          aggregate.progress.push(...project.progress)
-          aggregate.todo.push(...project.todo)
-          aggregate.issues.push(...project.issues)
-          projects.set(project.name, aggregate)
-        }
-      } catch {
-        skipped.push(date)
-      }
+    if (allDates.length === 0) return { ...empty, dates: [], lastError: '' }
+
+    let dates: string[]
+    let label: string
+    let fallbackFrom = ''
+    let start = ''
+    let end = ''
+    if (scope === 'weekly') {
+      const pick = pickWeek(allDates, today)
+      dates = pick.dates
+      start = pick.start
+      end = pick.end
+      fallbackFrom = pick.fallbackFrom
+      label = `${pick.start} ~ ${pick.end}`
+    } else {
+      const pick = pickMonth(allDates, today.slice(0, 7))
+      start = `${pick.month}-01`
+      end = `${pick.month}-${String(new Date(Number(pick.month.slice(0, 4)), Number(pick.month.slice(5, 7)), 0).getDate()).padStart(2, '0')}`
+      const day = Number(end.slice(8))
+      dates = Array.from({ length: day }, (_, index) => `${pick.month}-${String(index + 1).padStart(2, '0')}`)
+      fallbackFrom = pick.fallbackMonth
+      label = pick.month
     }
+
+    const range = await readRange(cwd, dates)
     return {
-      month: pick.month,
-      days,
-      projects: [...projects.values()],
+      scope,
+      label,
+      start,
+      end,
+      dates,
+      days: range.days,
+      projects: range.projects,
       source,
-      lastError: skipped.length === 0 ? '' : `以下简报读取失败：${skipped.join('、')}`,
-      fallbackMonth: pick.fallbackMonth,
+      lastError: range.missing.length === 0 ? '' : `以下简报读取失败：${range.missing.join('、')}`,
+      fallbackFrom,
     }
   }
+
+  const generateWeekly = (args: any) => generateRange(args, 'weekly')
+  const generateMonthly = (args: any) => generateRange(args, 'monthly')
 
   const handlers: Record<string, (args: any) => Promise<unknown>> = {
     generateDaily,
+    generateWeekly,
     generateMonthly,
   }
 

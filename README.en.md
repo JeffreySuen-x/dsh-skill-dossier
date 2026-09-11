@@ -8,13 +8,15 @@ One package, three panels:
 
 | Panel | What it does |
 |---|---|
-| **Skills** | Browse, search, read details, one-click `/name` into the composer; **disable** (reversible trash) · reinstall · **delete** (one step, confirmed); session-scoped temporary skills |
+| **Skills** | Browse, search, read details, one-click `/name` into the composer; **disable** (reversible trash) · reinstall · **delete** (one step, confirmed) |
 | **Dossier** | Per-skill profile: direction (10 categories), use scope, capability boundaries, scenarios, origin, call stats, **observed load success/failure**, **catalog token cost**, freshness review |
-| **Report** | Two read-only views — **daily** and **monthly** — over `reporter/brief/YYYY-MM-DD.md` |
+| **Report** | Three read-only views — **daily** (detail), **weekly** (Mon–Sun) and **monthly** — over `reporter/brief/YYYY-MM-DD.md`. Weekly and monthly are a **Gantt chart plus one-line status per project** |
 
 > The report half is an **optional module**: `dataRoot` is configurable and defaults to `reporter/brief/` inside the workspace. Ignore it and it is just a panel nobody opens — the skill and dossier halves are unaffected.
 >
 > It deliberately has **no retrospective, no export, no run history**: a retrospective is the agent's job (let it read the briefs), export is what copy-paste already does, and run history existed to serve a scheduler that does not exist. The plugin only reads — no writes, no state, one less failure surface.
+>
+> **Weekly and monthly say three things only**: a one-line Gantt (which days saw progress), one status sentence per project, and its next steps and blockers. No day-by-day dump — that is what the daily view is for.
 
 ## Why a "dossier"
 

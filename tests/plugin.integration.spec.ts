@@ -179,6 +179,9 @@ function hostContext(options: {
       for (const [suffix, content] of options.files ?? []) {
         if (normalized.endsWith(suffix)) return content
       }
+      // 用例给了 files 就是声明了整套文件系统：没列出来的文件必须真的不存在，
+      // 否则「区间里某些天没有简报」这类语义会被替身悄悄填上假数据。
+      if (options.files !== undefined) throw Object.assign(new Error('missing'), { code: 'ENOENT' })
       return `---\ndate: ${today}\n---\n\n# Brief\n\n## 管理插件\n- 作用：管理技能\n- 实现：host + client\n- 今日进度：\n  1. 单包汇报\n- 待办：\n- 问题：\n`
     },
     writeText: async (target: unknown, content: string, encoding?: unknown, opts?: unknown, policy?: unknown) => {
@@ -355,259 +358,6 @@ describe('single-package host activation', () => {
     )
 
     expect(crossSite).toEqual({ status: 403, body: { error: '跨站请求被拒绝' } })
-  })
-
-  it('isolates temporary skills and ownership between sessions', async () => {
-    const { ctx, routes } = hostContext()
-    apply(ctx as never)
-    const route = routes.get('/api/skill-manager')!
-
-    const first = await post(route, {
-      method: 'register',
-      args: { sessionId: 'session-1', name: 'same-name', description: 'First', content: 'first body' },
-    })
-    const second = await post(route, {
-      method: 'register',
-      args: { sessionId: 'session-2', name: 'same-name', description: 'Second', content: 'second body' },
-    })
-
-    expect(first.body).toEqual({ ok: true })
-    expect(second.body).toEqual({ ok: true })
-    expect((await post(route, { method: 'get', args: { sessionId: 'session-1', name: 'same-name' } })).body.content).toBe('first body')
-    expect((await post(route, { method: 'get', args: { sessionId: 'session-2', name: 'same-name' } })).body.content).toBe('second body')
-
-    await post(route, {
-      method: 'register',
-      args: { sessionId: 'session-1', name: 'first-only', description: 'First only', content: 'private body' },
-    })
-    expect((await post(route, { method: 'get', args: { sessionId: 'session-2', name: 'first-only' } })).body).toBeNull()
-    expect((await post(route, { method: 'unregister', args: { sessionId: 'session-2', name: 'first-only' } })).body)
-      .toEqual({ ok: false, error: '该技能不是本会话注册的临时技能' })
-    expect((await post(route, { method: 'get', args: { sessionId: 'session-1', name: 'first-only' } })).body.content).toBe('private body')
-  })
-
-  it('rejects temporary registration without a live session', async () => {
-    const { ctx, routes } = hostContext()
-    apply(ctx as never)
-
-    const response = await post(routes.get('/api/skill-manager')!, {
-      method: 'register',
-      args: { name: 'global-leak', description: 'Must not leak', content: 'body' },
-    })
-
-    expect(response.body).toEqual({ ok: false, error: '当前会话没有活跃的 agent' })
-  })
-
-  it('does not let a session-owned registration replace a discovered skill', async () => {
-    const { ctx, routes } = hostContext({
-      skill: {
-        name: 'installed-skill',
-        description: 'Installed',
-        invocation: { modelInvocable: true, userInvocable: true },
-        source: 'project-dsh',
-        provider: 'filesystem',
-        content: 'installed body',
-      },
-    })
-    apply(ctx as never)
-    const route = routes.get('/api/skill-manager')!
-
-    const response = await post(route, {
-      method: 'register',
-      args: { sessionId: 'session-1', name: 'installed-skill', description: 'Override', content: 'override body' },
-    })
-
-    expect(response.body).toEqual({ ok: false, error: '同名技能 "installed-skill" 已存在' })
-    expect((await post(route, { method: 'get', args: { sessionId: 'session-1', name: 'installed-skill' } })).body.content)
-      .toBe('installed body')
-  })
-
-  it('serializes same-session replacement and unregisters the winning registration', async () => {
-    const { ctx, routes, sessionDisposerCount } = hostContext()
-    apply(ctx as never)
-    const route = routes.get('/api/skill-manager')!
-
-    const [first, second] = await Promise.all([
-      post(route, {
-        method: 'register',
-        args: { sessionId: 'session-1', name: 'racing-skill', description: 'First', content: 'first body' },
-      }),
-      post(route, {
-        method: 'register',
-        args: { sessionId: 'session-1', name: 'racing-skill', description: 'Second', content: 'second body' },
-      }),
-    ])
-
-    expect(first.body).toEqual({ ok: true })
-    expect(second.body).toEqual({ ok: true })
-    expect((await post(route, { method: 'get', args: { sessionId: 'session-1', name: 'racing-skill' } })).body.content).toBe('second body')
-    expect((await post(route, { method: 'unregister', args: { sessionId: 'session-1', name: 'racing-skill' } })).body).toEqual({ ok: true })
-    expect((await post(route, { method: 'get', args: { sessionId: 'session-1', name: 'racing-skill' } })).body).toBeNull()
-    expect(sessionDisposerCount('session-1')).toBe(0)
-  })
-
-  it('lets agent-scope disposal remove its temporary skill registrations', async () => {
-    const { ctx, routes, disposeSession, sessionSkillNames } = hostContext()
-    apply(ctx as never)
-    const route = routes.get('/api/skill-manager')!
-    await post(route, {
-      method: 'register',
-      args: { sessionId: 'session-1', name: 'short-lived', description: 'Temporary', content: 'body' },
-    })
-    expect(sessionSkillNames('session-1')).toEqual(['short-lived'])
-
-    disposeSession('session-1')
-
-    expect(sessionSkillNames('session-1')).toEqual([])
-    expect((await post(route, {
-      method: 'unregister',
-      args: { sessionId: 'session-1', name: 'short-lived' },
-    })).body).toEqual({ ok: false, error: '当前会话没有活跃的 agent' })
-  })
-
-  it('disposes temporary skills from every live session when the plugin stops', async () => {
-    const { ctx, routes, disposePlugin, sessionSkillNames, sessionDisposerCount } = hostContext()
-    apply(ctx as never)
-    const route = routes.get('/api/skill-manager')!
-    for (const sessionId of ['session-1', 'session-2']) {
-      await post(route, {
-        method: 'register',
-        args: { sessionId, name: 'plugin-owned', description: 'Temporary', content: sessionId },
-      })
-      expect(sessionSkillNames(sessionId)).toEqual(['plugin-owned'])
-    }
-
-    disposePlugin()
-
-    expect(sessionSkillNames('session-1')).toEqual([])
-    expect(sessionSkillNames('session-2')).toEqual([])
-    expect(sessionDisposerCount('session-1')).toBe(0)
-    expect(sessionDisposerCount('session-2')).toBe(0)
-    expect(routes.size).toBe(0)
-  })
-
-  it('does not register after plugin disposal wins an in-flight catalog lookup', async () => {
-    let releaseList!: () => void
-    let markListStarted!: () => void
-    const listStarted = new Promise<void>((resolve) => { markListStarted = resolve })
-    const listReleased = new Promise<void>((resolve) => { releaseList = resolve })
-    const { ctx, routes, disposePlugin, sessionSkillNames } = hostContext({
-      listSkills: async (_view, visible) => {
-        markListStarted()
-        await listReleased
-        return visible
-      },
-    })
-    apply(ctx as never)
-    const route = routes.get('/api/skill-manager')!
-    const request = post(route, {
-      method: 'register',
-      args: { sessionId: 'session-1', name: 'too-late', description: 'Temporary', content: 'body' },
-    })
-    await listStarted
-
-    disposePlugin()
-    releaseList()
-
-    expect((await request).body).toEqual({ ok: false, error: '插件或当前会话已停止' })
-    expect(sessionSkillNames('session-1')).toEqual([])
-  })
-
-  it('does not register after session disposal wins an in-flight catalog lookup', async () => {
-    let releaseList!: () => void
-    let markListStarted!: () => void
-    const listStarted = new Promise<void>((resolve) => { markListStarted = resolve })
-    const listReleased = new Promise<void>((resolve) => { releaseList = resolve })
-    const { ctx, routes, disposeSession, sessionSkillNames } = hostContext({
-      listSkills: async (_view, visible) => {
-        markListStarted()
-        await listReleased
-        return visible
-      },
-    })
-    apply(ctx as never)
-    const route = routes.get('/api/skill-manager')!
-    const request = post(route, {
-      method: 'register',
-      args: { sessionId: 'session-1', name: 'too-late', description: 'Temporary', content: 'body' },
-    })
-    await listStarted
-
-    disposeSession('session-1')
-    releaseList()
-
-    expect((await request).body).toEqual({ ok: false, error: '插件或当前会话已停止' })
-    expect(sessionSkillNames('session-1')).toEqual([])
-  })
-
-  it('rejects a queued registration after its session becomes inactive', async () => {
-    let releaseList!: () => void
-    let markListStarted!: () => void
-    let listCalls = 0
-    const listStarted = new Promise<void>((resolve) => { markListStarted = resolve })
-    const listReleased = new Promise<void>((resolve) => { releaseList = resolve })
-    const { ctx, routes, disposeSession, sessionSkillNames } = hostContext({
-      listSkills: async (_view, visible) => {
-        listCalls += 1
-        if (listCalls === 1) {
-          markListStarted()
-          await listReleased
-        }
-        return visible
-      },
-    })
-    apply(ctx as never)
-    const route = routes.get('/api/skill-manager')!
-    const first = post(route, {
-      method: 'register',
-      args: { sessionId: 'session-1', name: 'first-waiter', description: 'Temporary', content: 'first' },
-    })
-    await listStarted
-    const queued = post(route, {
-      method: 'register',
-      args: { sessionId: 'session-1', name: 'queued-waiter', description: 'Temporary', content: 'second' },
-    })
-    await new Promise<void>((resolve) => { setImmediate(resolve) })
-
-    disposeSession('session-1')
-    releaseList()
-
-    expect((await first).body).toEqual({ ok: false, error: '插件或当前会话已停止' })
-    expect((await queued).body).toEqual({ ok: false, error: '插件或当前会话已停止' })
-    expect(sessionSkillNames('session-1')).toEqual([])
-  })
-
-  it('rejects a same-layer registration that wins after the catalog snapshot', async () => {
-    let injected = false
-    const competing: FakeSkill = {
-      name: 'contended-skill',
-      description: 'Competing registration',
-      invocation: { modelInvocable: true, userInvocable: true },
-      source: 'runtime',
-      provider: 'competing-plugin',
-      content: 'competing body',
-    }
-    const { ctx, routes, sessionDisposerCount } = hostContext({
-      listSkills: async (_view, visible, registerSessionSkill) => {
-        if (!injected) {
-          injected = true
-          registerSessionSkill('session-1', competing)
-        }
-        return visible
-      },
-    })
-    apply(ctx as never)
-    const route = routes.get('/api/skill-manager')!
-
-    const response = await post(route, {
-      method: 'register',
-      args: { sessionId: 'session-1', name: 'contended-skill', description: 'Ours', content: 'our body' },
-    })
-
-    expect(response.body).toEqual({ ok: false, error: '同名技能 "contended-skill" 已存在' })
-    expect((await post(route, { method: 'get', args: { sessionId: 'session-1', name: 'contended-skill' } })).body)
-      .toMatchObject({ provider: 'competing-plugin', content: 'competing body', owned: false })
-    expect(sessionDisposerCount('session-1')).toBe(1)
   })
 
   it('surfaces a corrupt manager index instead of replacing it with an empty one', async () => {
@@ -949,7 +699,7 @@ describe('single-package host activation', () => {
     expect(response.body.error).toContain('rollback failed')
   })
 
-  it('generates monthly data, exports both formats, and reviews the actual brief contract', async () => {
+  it('parses the real brief contract and keeps the report half read-only', async () => {
     const writes: Array<{ target: string; content: string }> = []
     const followups: unknown[] = []
     const { ctx, routes } = hostContext({
@@ -963,8 +713,13 @@ describe('single-package host activation', () => {
     expect(monthly.status).toBe(200)
     expect(monthly.body.lastError).toBe('')
     expect(monthly.body.projects).toEqual([
-      expect.objectContaining({ name: '管理插件', progress: ['单包汇报'] }),
+      // 周报/月报只要「作用 + 一句现状 + 待办 + 难点」，不再带实现细节。
+      expect.objectContaining({ name: '管理插件', purpose: '管理技能', progress: '单包汇报' }),
     ])
+    // 周报同形：都是「日期区间 + 每天有谁 + 每个项目一句现状」。
+    const weekly = await post(route, { method: 'generateWeekly', args: { sessionId: 'session-1' } })
+    expect(weekly.body.scope).toBe('weekly')
+    expect(weekly.body.projects[0]).toEqual(expect.objectContaining({ name: '管理插件', progress: '单包汇报' }))
 
     // 汇报只剩两个只读视图：写入与 agent 触发都必须不存在。
     const exported = await post(route, { method: 'export', args: { sessionId: 'session-1', view: 'monthly' } })
@@ -973,6 +728,34 @@ describe('single-package host activation', () => {
     expect(reviewed.status).toBe(404)
     expect(writes).toEqual([])
     expect(followups).toEqual([])
+  })
+
+  it('serves weekly and monthly ranges with the latest progress per project', async () => {
+    const date = currentDateKey()
+    const brief = (progress: string) => `---\ndate: ${date}\n---\n\n# Brief\n\n## 管理插件\n- 作用：管理技能\n- 实现：单包\n- 今日进度：\n  1. ${progress}\n- 待办：\n  1. 补安装冒烟\n- 问题：\n  1. 定时未验证\n`
+    const files = new Map<string, string>([[`reporter/brief/${date}.md`, brief('最新一句现状')]])
+    const { ctx, routes } = hostContext({
+      files,
+      listDir: async () => [{ name: `${date}.md` }],
+    })
+    apply(ctx as never)
+    const route = routes.get('/api/report')!
+
+    const weekly = await post(route, { method: 'generateWeekly', args: { sessionId: 'session-1' } })
+    expect(weekly.body.scope).toBe('weekly')
+    expect(weekly.body.dates).toHaveLength(7)
+    expect(weekly.body.dates).toContain(date)
+    const project = weekly.body.projects.find((item: any) => item.name === '管理插件')
+    expect(project.progress).toBe('最新一句现状')
+    expect(project.todo).toEqual(['补安装冒烟'])
+    expect(project.issues).toEqual(['定时未验证'])
+    expect(project.days).toEqual([date])
+
+    const monthly = await post(route, { method: 'generateMonthly', args: { sessionId: 'session-1' } })
+    expect(monthly.body.scope).toBe('monthly')
+    expect(monthly.body.dates.length).toBeGreaterThanOrEqual(28)
+    expect(monthly.body.dates).toContain(date)
+    expect(monthly.body.label).toBe(date.slice(0, 7))
   })
 
   it('treats a missing brief directory as an empty first-run report', async () => {

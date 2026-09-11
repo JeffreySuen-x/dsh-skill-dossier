@@ -1,6 +1,6 @@
 /**
  * Skills 管理面板：目录浏览/搜索/详情/调用/建档，档案页（方向筛选、
- * 未建档清单、档案卡片、停用/重装/删除），以及会话级临时技能的注册与卸载。
+ * 未建档清单、档案卡片、停用/重装/删除）。
  * 组件自包含（按钮 + 弹层），无宿主 hook 依赖。
  */
 import { useEffect, useState } from 'react'
@@ -29,7 +29,6 @@ interface Summary {
   userInvocable: boolean
   source: string
   provider: string
-  owned: boolean
   /** 目录成本估算（name+description+whenToUse 进系统提示的 ≈token 数）。 */
   approxTokens?: number
 }
@@ -68,23 +67,29 @@ interface ReportDaily {
   lastError?: string
   fallbackFrom?: string
 }
-interface ReportDay {
-  date: string
-  projects: string[]
-  progress: string[]
+interface RangeProject {
+  name: string
+  purpose: string
+  progress: string
   todo: string[]
   issues: string[]
+  days: string[]
 }
-interface ReportMonthly {
-  month: string
-  days: ReportDay[]
-  projects: ReportProject[]
+/** 周报 / 月报：同一套区间形状，前端只负责画甘特图 + 现状卡。 */
+interface ReportRange {
+  scope: 'weekly' | 'monthly'
+  label: string
+  start: string
+  end: string
+  dates: string[]
+  days: Array<{ date: string; projects: string[] }>
+  projects: RangeProject[]
   source?: string
   lastError?: string
-  fallbackMonth?: string
+  fallbackFrom?: string
 }
-type ReportData = ReportDaily | ReportMonthly
-type ReportView = 'daily' | 'monthly'
+type ReportData = ReportDaily | ReportRange
+type ReportView = 'daily' | 'weekly' | 'monthly'
 /** 两个 host 路由共用一个 JSON-RPC 客户端。 */
 async function rpc<T = unknown>(path: string, method: string, args?: unknown): Promise<T> {
   const res = await fetch(path, {
@@ -141,7 +146,6 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
   const [confirmName, setConfirmName] = useState<string | null>(null)
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
-  const [form, setForm] = useState({ name: '', description: '', whenToUse: '', content: '', modelInvocable: true, userInvocable: true })
   const [reportView, setReportView] = useState<ReportView>('daily')
   const [reportData, setReportData] = useState<ReportData | null>(null)
   const [reportLoading, setReportLoading] = useState(false)
@@ -188,15 +192,14 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
     const p = profiles[name]
     return p !== undefined && typeof p.direction === 'string' && p.direction !== ''
   }
-  const originKeyOfName = (name: string, owned: boolean, source: string): Origin | undefined => {
+  const originKeyOfName = (name: string, source: string): Origin | undefined => {
     const entry = profiles[name]
     if (entry !== undefined && entry.origin !== undefined) return entry.origin
-    if (owned) return 'self'
     if (source === 'bundled') return 'system'
     return undefined
   }
   const originOf = (s: Summary) => {
-    const key = originKeyOfName(s.name, s.owned, s.source) ?? 'unknown'
+    const key = originKeyOfName(s.name, s.source) ?? 'unknown'
     return { key, label: ORIGIN_LABELS[key] }
   }
 
@@ -264,7 +267,6 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
   )
   const reinstall = (name: string) => doCall('reinstall', { name, sessionId })
   const deleteTrash = (name: string) => { setConfirmName(null); doCall('deleteTrash', { name, sessionId }) }
-  const removeSkill = (name: string) => doCall('unregister', { name, sessionId })
 
   const openDetail = (name: string) => {
     setView('detail')
@@ -273,28 +275,6 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
     rpc<Detail | null>(MANAGER_API, 'get', { name, sessionId })
       .then((res) => setDetail(res))
       .catch((error: unknown) => { setDetail(null); setNotice(String(error)) })
-  }
-
-  const submitCreate = () => {
-    // 名称合法性由 host 的 register 统一校验（同一规则只留一处实现）。
-    const name = form.name.trim()
-    if (form.description.trim() === '') { setNotice('描述不能为空'); return }
-    if (form.content.trim() === '') { setNotice('内容不能为空'); return }
-    setBusy(true)
-    setNotice('')
-    rpc<{ ok: boolean; error?: string }>(MANAGER_API, 'register', {
-      sessionId, name, description: form.description.trim(), whenToUse: form.whenToUse.trim(),
-      content: form.content, modelInvocable: form.modelInvocable, userInvocable: form.userInvocable,
-    }).then((res) => {
-      setBusy(false)
-      if (res !== null && typeof res === 'object' && res.ok === true) {
-        setView('list')
-        setForm({ name: '', description: '', whenToUse: '', content: '', modelInvocable: true, userInvocable: true })
-        reload()
-      } else {
-        setNotice(res !== null && typeof res === 'object' && typeof res.error === 'string' ? res.error : '注册失败')
-      }
-    }).catch((error: unknown) => { setBusy(false); setNotice(String(error)) })
   }
 
   const onKeyDown = (e: ReactKeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
@@ -338,16 +318,14 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
         </div>
         <Btn label="调用" kind="primary" disabled={!s.userInvocable} title={s.userInvocable ? `把 /${s.name} 填入输入框，再补充你的需求` : '该技能不允许用户显式调用'} onClick={(e) => { e.stopPropagation(); invoke(s.name) }} />
         {profiled || !fsSkill ? null : <Btn label="建档" onClick={(e) => { e.stopPropagation(); ingest(s.name) }} />}
-        {s.owned
-          ? <Btn label="卸载" kind="danger" onClick={(e) => { e.stopPropagation(); removeSkill(s.name) }} />
-          : fsSkill
-            ? (
-              <>
-                <Btn label="停用" title="移入 trash，可重装" onClick={(e) => { e.stopPropagation(); uninstall(s.name) }} />
-                <DangerDelete name={s.name} source={s.source} />
-              </>
-            )
-            : null}
+        {fsSkill
+          ? (
+            <>
+              <Btn label="停用" title="移入 trash，可重装" onClick={(e) => { e.stopPropagation(); uninstall(s.name) }} />
+              <DangerDelete name={s.name} source={s.source} />
+            </>
+          )
+          : null}
       </div>
     )
   }
@@ -373,15 +351,6 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
           : filtered !== null && filtered.length === 0
             ? <div className={css.hint}>{skills.length === 0 ? '当前没有可用技能' : '没有匹配的技能'}</div>
             : <div className={css.list}>{(filtered ?? []).map(row)}</div>}
-        <div className={css.section}>
-          <div className={css.sectionTitle}>临时技能（仅当前会话）</div>
-          <div className={css.hint}>
-            会话级试写：注册的技能只在本会话可见，会话结束自动回收，不落盘、不进档案。
-          </div>
-          <div className={css.detailActions}>
-            <Btn label="新建临时技能" onClick={() => { setNotice(''); setView('create') }} />
-          </div>
-        </div>
       </>
     )
   }
@@ -397,13 +366,12 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
         <div className={css.detailMeta}>
           <div className={css.rowName}>
             {d.name}
-            {d.owned ? <span className={css.badge}>临时</span> : null}
             {p !== null && p.direction !== undefined && p.direction !== ''
               ? <span className={`${css.badge} ${css.badgeOk}`}>{p.direction}</span>
               : null}
             {d.modelInvocable ? null : <span className={css.badge}>仅用户调用</span>}
           </div>
-          <OriginChips name={d.name} value={originKeyOfName(d.name, d.owned, d.source)} />
+          <OriginChips name={d.name} value={originKeyOfName(d.name, d.source)} />
           <div className={css.detailDesc}>{d.description}</div>
           {d.whenToUse !== null ? <div className={css.detailWhen}>适用：{d.whenToUse}</div> : null}
           <div className={css.detailSrc}>
@@ -421,37 +389,12 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
           <Btn label="← 返回" onClick={() => { setView('list'); setDetail(null) }} />
           {d.userInvocable ? <Btn label="调用" kind="primary" onClick={() => invoke(d.name)} /> : null}
           <Btn label={p !== null ? '重新建档' : '建档'} onClick={() => ingest(d.name)} />
-          {d.owned
-            ? <Btn label="卸载" kind="danger" onClick={() => removeSkill(d.name)} />
-            : FS_SOURCES.includes(d.source) ? <Btn label="停用" onClick={() => uninstall(d.name)} /> : null}
+          {FS_SOURCES.includes(d.source) ? <Btn label="停用" onClick={() => uninstall(d.name)} /> : null}
         </div>
         <pre className={css.pre}>{d.content}</pre>
       </>
     )
   }
-
-  // ---------- 新建临时技能 ----------
-
-  const createBody = () => (
-    <div className={css.form}>
-      <input className={css.input} type="text" placeholder="名称（kebab-case，如 my-skill）" value={form.name} autoFocus onChange={(e) => setForm({ ...form, name: e.target.value })} />
-      <input className={css.input} type="text" placeholder="描述（给模型的触发说明）" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
-      <input className={css.input} type="text" placeholder="whenToUse（可选）" value={form.whenToUse} onChange={(e) => setForm({ ...form, whenToUse: e.target.value })} />
-      <label className={css.formRow}>
-        <input type="checkbox" checked={form.modelInvocable} onChange={(e) => setForm({ ...form, modelInvocable: e.target.checked })} />
-        模型可调用
-      </label>
-      <label className={css.formRow}>
-        <input type="checkbox" checked={form.userInvocable} onChange={(e) => setForm({ ...form, userInvocable: e.target.checked })} />
-        用户可调用（/name 手势）
-      </label>
-      <textarea className={css.textarea} rows={10} placeholder="技能正文（markdown）" value={form.content} onChange={(e) => setForm({ ...form, content: e.target.value })} />
-      <div className={css.detailActions}>
-        <Btn label={busy ? '保存中…' : '注册'} kind="primary" onClick={submitCreate} />
-        <Btn label="取消" onClick={() => { setNotice(''); setView('list') }} />
-      </div>
-    </div>
-  )
 
   // ---------- 档案 ----------
 
@@ -622,7 +565,7 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
     setReportLoading(true)
     setReportError('')
     setReportData(null)
-    const method = view === 'monthly' ? 'generateMonthly' : 'generateDaily'
+    const method = view === 'daily' ? 'generateDaily' : view === 'weekly' ? 'generateWeekly' : 'generateMonthly'
     reportRpc<ReportData>(method, { sessionId })
       .then((data) => {
         const failure = reportFailureMessage(data)
@@ -635,6 +578,61 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
         setReportLoading(false)
       })
       .catch((error: unknown) => { setReportError(String(error)); setReportLoading(false) })
+  }
+
+  const joinItems = (items: string[] | undefined): string => {
+    const list = items ?? []
+    if (list.length === 0) return '无'
+    return list.length <= 3 ? list.join('；') : `${list.slice(0, 3).join('；')}（+${list.length - 3}）`
+  }
+
+  /** 甘特图：一行一个项目，一列一天；有记录的那天点亮。 */
+  const reportGantt = (range: ReportRange) => {
+    const byDate = new Map(range.days.map((day) => [day.date, new Set(day.projects)]))
+    return (
+      <div className={css.ganttScroll}>
+        <div className={css.gantt}>
+          <div className={css.ganttRow}>
+            <span className={css.ganttLabel} />
+            {range.dates.map((date) => (
+              <span key={date} className={css.ganttTick} title={date}>{Number(date.slice(8))}</span>
+            ))}
+          </div>
+          {range.projects.map((project) => (
+            <div key={project.name} className={css.ganttRow}>
+              <span className={css.ganttLabel} title={project.name}>{project.name}</span>
+              {range.dates.map((date) => (
+                <span
+                  key={date}
+                  className={`${css.ganttCell}${byDate.get(date)?.has(project.name) === true ? ` ${css.ganttOn}` : ''}`}
+                  title={`${project.name} · ${date}${byDate.get(date)?.has(project.name) === true ? '（有记录）' : ''}`}
+                />
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  /** 周报/月报的项目卡：作用 / 进度 / 待办 / 难点，一行一项，不展开。 */
+  const reportRangeProjects = (projects: RangeProject[]) => {
+    if (projects.length === 0) {
+      return <div className={css.hint}>该区间暂无记录。按 brief skill 维护 reporter/brief/YYYY-MM-DD.md，这里会自动汇总。</div>
+    }
+    return (
+      <div className={css.reportSec}>
+        {projects.map((project) => (
+          <div key={project.name} className={css.reportProject}>
+            <strong>{project.name}</strong>
+            <div>作用：{project.purpose || '—'}</div>
+            <div>进度：{project.progress || '—'}</div>
+            <div>待办：{joinItems(project.todo)}</div>
+            <div>难点：{joinItems(project.issues)}</div>
+          </div>
+        ))}
+      </div>
+    )
   }
 
   const reportItems = (items: string[] | undefined, empty: string) => {
@@ -673,36 +671,25 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
     let content: ReactNode = null
     if (reportLoading) content = <div className={css.hint}>读取 brief…</div>
     else if (data !== null) {
-      if (reportView === 'monthly' && 'days' in data) {
-        const monthly = data as ReportMonthly
+      if (reportView !== 'daily' && 'dates' in data) {
+        const range = data as ReportRange
+        const title = reportView === 'weekly' ? '周报' : '月报'
+        const active = range.projects.length
         content = (
           <>
             <div className={css.reportSec}>
               <div className={css.sectionTitle}>
-                按日（{monthly.month}）{monthly.fallbackMonth ? ` · 回退自 ${monthly.fallbackMonth}` : ''}
+                {title} {range.label}
+                {range.fallbackFrom ? ` · 回退自 ${range.fallbackFrom}` : ''}
               </div>
-              {(monthly.days ?? []).length === 0
-                ? <div className={css.hint}>该月暂无记录。</div>
-                : (
-                  <table className={css.reportTable}>
-                    <thead>
-                      <tr><th>日期</th><th>项目</th><th>进度</th><th>待办</th><th>问题</th></tr>
-                    </thead>
-                    <tbody>
-                      {monthly.days.map((day) => (
-                        <tr key={day.date}>
-                          <td>{day.date}</td>
-                          <td>{(day.projects ?? []).join('、')}</td>
-                          <td>{(day.progress ?? []).join('；')}</td>
-                          <td>{(day.todo ?? []).join('；')}</td>
-                          <td>{(day.issues ?? []).join('；')}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
+              <div className={css.hint}>
+                {range.days.length === 0
+                  ? '该区间暂无记录。'
+                  : `${range.days.length} 天有记录 · ${active} 个项目 · 亮格＝当天有进展`}
+              </div>
+              {range.days.length > 0 ? reportGantt(range) : null}
             </div>
-            {reportProjects(monthly.projects)}
+            {reportRangeProjects(range.projects)}
           </>
         )
       } else {
@@ -724,7 +711,8 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
       <div className={css.reportBody}>
         <div className={css.reportActions}>
           <button type="button" className={`${css.reportViewBtn}${reportView === 'daily' ? ` ${css.reportViewBtnActive}` : ''}`} onClick={() => { setReportView('daily'); loadReport('daily') }}>日报</button>
-          <button type="button" className={`${css.reportViewBtn}${reportView === 'monthly' ? ` ${css.reportViewBtnActive}` : ''}`} onClick={() => { setReportView('monthly'); loadReport('monthly') }}>月度</button>
+          <button type="button" className={`${css.reportViewBtn}${reportView === 'weekly' ? ` ${css.reportViewBtnActive}` : ''}`} onClick={() => { setReportView('weekly'); loadReport('weekly') }}>周报</button>
+          <button type="button" className={`${css.reportViewBtn}${reportView === 'monthly' ? ` ${css.reportViewBtnActive}` : ''}`} onClick={() => { setReportView('monthly'); loadReport('monthly') }}>月报</button>
         </div>
         {reportError !== '' ? <div className={css.notice}>{reportError}</div> : null}
         {content}
@@ -734,7 +722,7 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
 
   // ---------- 骨架 ----------
 
-  const headerTitle = tab === 'archive' ? '技能档案' : tab === 'report' ? '汇报' : view === 'create' ? '新建技能' : view === 'detail' ? '技能详情' : '技能'
+  const headerTitle = tab === 'archive' ? '技能档案' : tab === 'report' ? '汇报' : view === 'detail' ? '技能详情' : '技能'
 
   return (
     <div className={css.wrap} data-theme={scheme}>
@@ -765,11 +753,7 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
             ? archiveBody()
             : tab === 'report'
               ? reportBody()
-              : view === 'list' ? listBody() : view === 'detail' ? detailBody() : createBody()}
-          <div className={`${css.hint} ${css.footer}`}>
-            来源标注：自创=自己创建 · 外来=下载/他人 · 系统=随 DSH 内置 · 未标注=尚未标记（点击徽标即可切换）。
-            新加入 .dsh/skills 或 ~/.dsh/skills 的技能会自动出现在「技能」页；档案保存在 {'<工作区>'}/.dsh/skill-manager/index.json。
-          </div>
+              : view === 'list' ? listBody() : detailBody()}
         </div>
       ) : null}
     </div>

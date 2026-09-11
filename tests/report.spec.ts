@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { reportFailureMessage } from '../src/client/report-state.ts'
-import { parseBrief, pickDailyDate, pickMonth, toMarkdown } from '../src/report.ts'
+import { parseBrief, pickDailyDate, pickMonth, pickWeek } from '../src/report.ts'
 
 describe('brief report contract', () => {
   it('parses numbered and bulleted project fields', () => {
@@ -38,33 +38,32 @@ describe('brief report contract', () => {
     expect(pickMonth([], '2026-09')).toEqual({ month: '2026-09', fallbackMonth: '', dates: [] })
   })
 
-  it('renders monthly progress and issues as content, not counters', () => {
-    const markdown = toMarkdown({
-      month: '2026-09',
-      days: [{ date: '2026-09-03', projects: ['管理插件'], progress: ['完成单包汇报'], todo: ['补安装冒烟'], issues: ['Windows 待验证'] }],
-      projects: [{ name: '管理插件', purpose: '管理技能', impl: 'host + client', progress: ['完成单包汇报'], todo: ['补安装冒烟'], issues: ['Windows 待验证'] }],
-    }, 'monthly')
-
-    expect(markdown).toContain('完成单包汇报')
-    expect(markdown).toContain('Windows 待验证')
-    expect(markdown).not.toContain('progressTotal')
-  })
-
-  it('escapes markdown table delimiters and line breaks in brief content', () => {
-    const markdown = toMarkdown({
-      month: '2026-09',
-      days: [{ date: '2026-09-03', projects: ['A | B', 'C \\| D'], progress: ['第一行\n第二行'], todo: [], issues: [] }],
-      projects: [],
-    }, 'monthly')
-
-    expect(markdown).toContain('A &#124; B')
-    expect(markdown).toContain('C \\&#124; D')
-    expect(markdown).toContain('第一行<br>第二行')
-  })
-
   it('surfaces structured report failures to the client state', () => {
     expect(reportFailureMessage({ lastError: '简报读取失败' })).toBe('简报读取失败')
     expect(reportFailureMessage({ lastError: '' })).toBe('')
     expect(reportFailureMessage({})).toBe('')
+  })
+})
+
+describe('pickWeek', () => {
+  it('returns the Monday..Sunday week containing today', () => {
+    const pick = pickWeek(['2026-09-11'], '2026-09-11')
+    expect(pick.dates).toHaveLength(7)
+    expect(pick.dates).toContain('2026-09-11')
+    expect(new Date(`${pick.dates[0]}T00:00:00`).getDay()).toBe(1)
+    expect(new Date(`${pick.dates[6]}T00:00:00`).getDay()).toBe(0)
+    expect(pick.fallbackFrom).toBe('')
+  })
+
+  it('falls back to the latest week that has data when this week is empty', () => {
+    const pick = pickWeek(['2026-09-01'], '2026-09-11')
+    expect(pick.dates).toContain('2026-09-01')
+    expect(pick.fallbackFrom).toBe('2026-09-11')
+  })
+
+  it('still yields a full week when there is no data at all', () => {
+    const pick = pickWeek([], '2026-09-11')
+    expect(pick.dates).toHaveLength(7)
+    expect(pick.fallbackFrom).toBe('')
   })
 })

@@ -67,12 +67,18 @@ export declare function pickDailyDate(allDates: string[], today: string): {
     date: string;
     fallbackFrom: string;
 };
+/** 当周（周一~周日）的 7 个日期；今天不在有数据的周里就回退到最近一个有数据的周。 */
+export declare function pickWeek(allDates: string[], today: string): {
+    start: string;
+    end: string;
+    dates: string[];
+    fallbackFrom: string;
+};
 export declare function pickMonth(allDates: string[], currentMonth: string): {
     month: string;
     fallbackMonth: string;
     dates: string[];
 };
-export declare function toMarkdown(data: any, view: 'daily' | 'monthly'): string;
 /** Register `/api/report` as part of the manager package's host activation. */
 export declare function registerReportApi(ctx: EffectContextLike, deps: ReportDependencies): void;
 export {};

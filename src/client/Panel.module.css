@@ -510,3 +510,51 @@
   color: var(--sm-text);
   word-break: break-all;
 }
+
+/* 周报/月报的甘特图：一行一项目、一列一天，亮格＝那天有记录。 */
+.ganttScroll {
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.gantt {
+  min-width: max-content;
+}
+
+.ganttRow {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  line-height: 1.4;
+}
+
+.ganttLabel {
+  flex: 0 0 132px;
+  max-width: 132px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--sm-text-2);
+  font-size: 12px;
+  padding-right: 6px;
+}
+
+.ganttTick {
+  flex: 0 0 14px;
+  text-align: center;
+  font-size: 10px;
+  color: var(--sm-text-2);
+}
+
+.ganttCell {
+  flex: 0 0 14px;
+  height: 12px;
+  border-radius: 2px;
+  background: var(--sm-bg-2);
+  border: 1px solid var(--sm-border);
+}
+
+.ganttOn {
+  background: var(--sm-fill);
+  border-color: var(--sm-fill);
+}

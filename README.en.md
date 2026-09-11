@@ -118,7 +118,7 @@ The repository **commits its `lib/` build artifacts**, so a git install works as
 | `skill_archive` | Write a skill profile (direction / use scope / boundaries / scenarios / origin) |
 | `skill_review` | List skills due for review (freshness ranking) |
 
-> The earlier `skill_match` / `skill_route` / `skill_usage` / `skill_eval` tools were removed: DSH already puts the skill catalog (name + description) into the system prompt and lets the model choose, so a lexical router on top showed no measured benefit (8 weeks on the author's machine: 233 `skill` calls vs 0 `skill_match` and 1 `skill_route`). The data is still recorded — it just no longer has its own panel and tools.
+> The earlier `skill_match` / `skill_route` / `skill_usage` / `skill_eval` tools were removed: DSH already puts the skill catalog (name + description) into the system prompt and lets the model choose, so a lexical router on top showed no measured benefit — the call distribution showed it was almost never selected. The data is still recorded — it just no longer has its own panel and tools.
 
 ## Configuration
 

@@ -503,52 +503,6 @@ export function apply(ctx: Context, config?: Config): void {
     })
 
     tools.register({
-      name: 'record_eval',
-      description: '把 darwin-skill 的评测结论写回技能档案：score(0-10)、baselineDelta(用 vs 不用的差异描述)、conclusion(有效/无效/待评测)。',
-      parameters: {
-        type: 'object',
-        properties: {
-          name: { type: 'string', description: '技能名（kebab-case）' },
-          score: { type: 'number', description: '评测得分 0-10' },
-          baselineDelta: { type: 'string', description: '用 skill vs 不用的差异（一句话）' },
-          conclusion: { type: 'string', description: '有效 / 无效 / 待评测' },
-        },
-        required: ['name', 'conclusion'],
-      },
-      output: {
-        schema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            ok: { type: 'boolean' },
-            message: { type: 'string' },
-          },
-        },
-        render: (_args: unknown, value: any) => [{ type: 'text', text: String(value.message ?? '') }],
-      },
-      async execute(args: any, exec: any): Promise<{ ok: boolean; message: string }> {
-        const name = typeof args.name === 'string' ? args.name.trim() : ''
-        if (!NAME_RE.test(name)) throw new Error(`无效的技能名：${name}`)
-        const agent = exec.agent as AgentLike | undefined
-        if (agent === undefined) throw new Error('无法确定当前会话')
-        const conclusion: '有效' | '无效' | '待评测' = args.conclusion === '有效' || args.conclusion === '无效' || args.conclusion === '待评测'
-          ? args.conclusion
-          : '待评测'
-        await indexStore.update(agent.session.header.cwd, (index) => {
-          const entry = index.skills[name]
-          if (entry === null || typeof entry !== 'object') throw new Error(`技能 "${name}" 未建档`)
-          entry.evaluation = {
-            score: typeof args.score === 'number' && Number.isFinite(args.score) ? args.score : null,
-            judgedAt: Date.now(),
-            baselineDelta: typeof args.baselineDelta === 'string' && args.baselineDelta.trim() !== '' ? args.baselineDelta.trim() : null,
-            conclusion,
-          }
-        })
-        return { ok: true, message: `已记录技能 "${name}" 的评测结论：${conclusion}` }
-      },
-    })
-
-    tools.register({
       name: 'skill_dossier',
       description: '读取某个技能的档案（方向 / 使用范围 / 能力边界 / 应用场景 / 调用与实测情况）。技能目录里只有名称和描述，靠它无法判断边界——在决定加载某个技能全文之前，先用本工具读档案；没有档案就用 skill_archive 补一个。',
       parameters: {
@@ -597,9 +551,6 @@ export function apply(ctx: Context, config?: Config): void {
             ? `，失败 ${entry.outcomes.failed} 次${entry.outcomes.lastError === undefined || entry.outcomes.lastError === '' ? '' : `（最近一次：${entry.outcomes.lastError}）`}`
             : '，无失败'
           lines.push(`实测：加载成功 ${entry.outcomes.loaded} 次${failures}`)
-        }
-        if (entry.evaluation !== undefined) {
-          lines.push(`评测：${entry.evaluation.conclusion}${entry.evaluation.score === null ? '' : ` · ${entry.evaluation.score}/10`}`)
         }
         const definition = await skills.get(name, { scope: agent as unknown, cwd })
         if (definition !== undefined && typeof definition.description === 'string') {

@@ -525,13 +525,6 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
               {p.outcomes.failed > 0 ? ` · 失败 ${p.outcomes.failed} 次${p.outcomes.lastError !== undefined && p.outcomes.lastError !== '' ? `（${p.outcomes.lastError}）` : ''}` : ''}
             </div>
           ) : null}
-          {p.evaluation !== undefined ? (
-            <div className={css.profileRow}>
-              评测：{p.evaluation.conclusion}
-              {p.evaluation.score !== null ? ` · ${p.evaluation.score}/10` : ''}
-              {p.evaluation.baselineDelta !== null && p.evaluation.baselineDelta !== '' ? ` · ${p.evaluation.baselineDelta}` : ''}
-            </div>
-          ) : null}
           <OriginChips name={name} value={p.origin} small />
           <div className={css.detailActions}>
             <Btn label={profiled ? '重新建档' : '识别建档'} {...(profiled ? {} : { kind: 'primary' as const })} onClick={() => ingest(name)} />
@@ -579,7 +572,7 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
           <div className={css.section}>
             <div className={css.sectionTitle}>待复审（{needsReview.length}）</div>
             <div className={css.hint}>
-              按「易变方向 + 长期未用 + 久未复审」排序。复审结论可用 record_eval 写回档案。
+              按「易变方向 + 长期未用 + 久未复审」排序，点进去看档案再决定更新还是删。
             </div>
             {needsReview.map((entry) => (
               <div key={entry.name} className={css.row}>

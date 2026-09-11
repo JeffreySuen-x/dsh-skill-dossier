@@ -11,19 +11,12 @@ export interface IndexEntry {
   updatedAt?: number
   reviewedAt?: number
   contentHash?: string
-  /** 实测调用结果（来自 tools/result 的观察，不是模型自述）：加载成功/失败次数。
-   * 与 evaluation（模型评测结论）互补——一个说「跑起来了吗」，一个说「有用吗」。 */
+  /** 实测调用结果（来自 tools/result 的观察，不是模型自述）：加载成功/失败次数。 */
   outcomes?: {
     loaded: number
     failed: number
     lastAt: number
     lastError?: string
-  }
-  evaluation?: {
-    score: number | null
-    judgedAt: number
-    baselineDelta: string | null
-    conclusion: '有效' | '无效' | '待评测'
   }
 }
 

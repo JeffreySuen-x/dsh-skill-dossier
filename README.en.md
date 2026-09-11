@@ -9,7 +9,7 @@ One package, three panels:
 | Panel | What it does |
 |---|---|
 | **Skills** | Browse, search, read details, one-click `/name` into the composer; **disable** (reversible trash) · reinstall · **delete** (one step, confirmed); session-scoped temporary skills |
-| **Dossier** | Per-skill profile: direction (10 categories), use scope, capability boundaries, scenarios, origin, call stats, **observed load success/failure**, **catalog token cost**, freshness review, evaluation verdicts |
+| **Dossier** | Per-skill profile: direction (10 categories), use scope, capability boundaries, scenarios, origin, call stats, **observed load success/failure**, **catalog token cost**, freshness review |
 | **Report** | Two read-only views — **daily** and **monthly** — over `reporter/brief/YYYY-MM-DD.md` |
 
 > The report half is an **optional module**: `dataRoot` is configurable and defaults to `reporter/brief/` inside the workspace. Ignore it and it is just a panel nobody opens — the skill and dossier halves are unaffected.
@@ -29,7 +29,6 @@ Comparable plugins stop at "list them, toggle them". This one goes one step furt
 
 - **Profile fields**: direction / use scope / capability boundaries / scenarios / origin (self · external · system · unmarked) / authored at / reviewed at / content hash
 - **Observed outcomes**: subscribes to DSH's official `tools/result` event; a `skill` load that succeeds is recorded ✅, a failure ❌ with its error — not "the model says it is useful" but "did it actually load"
-- **Evaluation verdict**: `record_eval` writes back score (0-10) / baselineDelta / effective · ineffective · pending, complementing observation (one says "did it run", the other says "was it worth it")
 - **Catalog cost**: estimates ≈tokens each skill's name+description occupies in the system prompt, answering "who is eating the context"
 - **Freshness review**: ranks by "volatile direction + long unused + long unreviewed", telling the model or the human exactly which skills to revisit
 
@@ -57,7 +56,6 @@ The repository **commits its `lib/` build artifacts**, so a git install works as
 | `skill_dossier` | **Read** one skill's dossier (direction / scope / boundaries / scenarios / usage and observed outcomes); use it before loading a skill's full text |
 | `skill_archive` | Write a skill profile (direction / use scope / boundaries / scenarios / origin) |
 | `skill_review` | List skills due for review (freshness ranking) |
-| `record_eval` | Write an evaluation verdict (score / baselineDelta / conclusion) back into the dossier |
 
 > The earlier `skill_match` / `skill_route` / `skill_usage` / `skill_eval` tools were removed: DSH already puts the skill catalog (name + description) into the system prompt and lets the model choose, so a lexical router on top showed no measured benefit (8 weeks on the author's machine: 233 `skill` calls vs 0 `skill_match` and 1 `skill_route`). The data is still recorded — it just no longer has its own panel and tools.
 

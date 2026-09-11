@@ -347,7 +347,6 @@ export function Panel({ sessionId, prependDraft }: SkillManagerInjected) {
   }
 
   const listBody = () => {
-    const q = query.trim().toLowerCase()
     const all = skills ?? []
     const chips = skillFilterChips(all.map((s) => ({ name: s.name, direction: profiles[s.name]?.direction })))
     const filtered = skills === null ? null : all.filter((s) => {
@@ -357,14 +356,6 @@ export function Panel({ sessionId, prependDraft }: SkillManagerInjected) {
     })
     return (
       <>
-        <input
-          className={css.search}
-          type="text"
-          placeholder="搜索名称或描述…"
-          value={query}
-          autoFocus
-          onChange={(e) => setQuery(e.target.value)}
-        />
         {skills === null
           ? null
           : (
@@ -426,7 +417,7 @@ export function Panel({ sessionId, prependDraft }: SkillManagerInjected) {
 
   const archiveBody = () => {
     const profiledNames = Object.keys(profiles)
-    const unprofiled = skills === null ? [] : skills.filter((s) => !hasProfile(s.name))
+    const unprofiled = skills === null ? [] : skills.filter((s) => !hasProfile(s.name) && matches([s.name, s.description]))
     const trashedNames = Object.keys(trash)
     const usageByName = new Map(summarizeUsage(usage, Date.now()).map((entry) => [entry.name, entry]))
     const needsReview = reviewCandidates(profiles, usage, Date.now(), 5)
@@ -642,7 +633,10 @@ export function Panel({ sessionId, prependDraft }: SkillManagerInjected) {
   }
 
   /** 周报/月报的项目卡：作用 / 进度 / 待办 / 难点，一行一项，不展开。 */
-  const reportRangeProjects = (projects: RangeProject[]) => {
+  const reportRangeProjects = (allProjects: RangeProject[]) => {
+    const projects = allProjects.filter((project) => matches([
+      project.name, project.purpose, project.progress, ...project.todo, ...project.issues,
+    ]))
     if (projects.length === 0) {
       return <div className={css.hint}>该区间暂无记录。按 brief skill 维护 reporter/brief/YYYY-MM-DD.md，这里会自动汇总。</div>
     }
@@ -668,7 +662,9 @@ export function Panel({ sessionId, prependDraft }: SkillManagerInjected) {
   }
 
   const reportProjects = (projects: ReportProject[] | undefined) => {
-    const list = projects ?? []
+    const list = (projects ?? []).filter((project) => matches([
+      project.name, project.purpose, project.impl, ...project.progress, ...project.todo, ...project.issues,
+    ]))
     if (list.length === 0) {
       return <div className={css.hint}>暂无记录。按 brief skill 维护 reporter/brief/YYYY-MM-DD.md，这里会自动汇总。</div>
     }
@@ -742,9 +738,18 @@ export function Panel({ sessionId, prependDraft }: SkillManagerInjected) {
     )
   }
 
-  // ---------- 骨架 ----------
+  // ---------- 搜索：面板级，三个页签共用同一个关键词 ----------
 
-  const headerTitle = tab === 'archive' ? '技能档案' : tab === 'report' ? '汇报' : view === 'detail' ? '技能详情' : '技能'
+  const q = query.trim().toLowerCase()
+  const matches = (parts: Array<string | undefined>): boolean => {
+    if (q === '') return true
+    return parts.some((part) => typeof part === 'string' && part.toLowerCase().includes(q))
+  }
+  const searchPlaceholder = tab === 'archive' ? '搜索技能名 / 使用范围 / 边界 / 场景…'
+    : tab === 'report' ? '搜索项目 / 作用 / 进度 / 待办 / 难点…'
+      : '搜索技能名或描述…'
+
+  // ---------- 骨架 ----------
 
   return (
     <div className={css.wrap}>
@@ -759,7 +764,15 @@ export function Panel({ sessionId, prependDraft }: SkillManagerInjected) {
       {open ? (
         <div className={css.panel} onKeyDown={onKeyDown}>
           <div className={css.header}>
-            <span className={css.title}>{headerTitle}</span>
+            <input
+              className={css.search}
+              type="text"
+              placeholder={searchPlaceholder}
+              value={query}
+              autoFocus
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            {query !== '' ? <Btn label="清除" title="清空搜索" onClick={() => setQuery('')} /> : null}
             <button type="button" className={css.btn} aria-label="关闭" onClick={() => setOpen(false)}>×</button>
           </div>
           <div className={css.tabs}>

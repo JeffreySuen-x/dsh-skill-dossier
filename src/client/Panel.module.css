@@ -76,18 +76,6 @@
   padding: 6px 10px;
 }
 
-.title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 14px;
-  font-weight: 500;
-  line-height: 22px;
-  color: var(--dsw-alias-label-primary, #0f1115);
-}
-
 /* ---------- 页签：原生 tab ---------- */
 
 .tabs {
@@ -138,9 +126,9 @@
 
 .search {
   box-sizing: border-box;
-  width: calc(100% - 20px);
+  flex: 1;
+  min-width: 0;
   height: 32px;
-  margin: 8px 10px 4px;
   padding: 0 10px;
   border: .5px solid var(--dsw-alias-border-l4, #00000029);
   border-radius: 8px;

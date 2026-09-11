@@ -181,6 +181,7 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
   const catalogTokens = data?.catalogTokens ?? 0
   const skills = data?.skills ?? null
   const tokensByName = new Map((skills ?? []).map((s) => [s.name, s.approxTokens ?? 0]))
+  const sourceByName = new Map((skills ?? []).map((s) => [s.name, s.source]))
   const activeNames = skills === null ? null : new Set(skills.map((s) => s.name))
   const hasProfile = (name: string) => Object.prototype.hasOwnProperty.call(profiles, name)
   const isProfiled = (name: string) => {
@@ -241,6 +242,26 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
   }
   const ingest = (name: string) => doCall('ingest', { name, sessionId }, () => setOpen(false))
   const uninstall = (name: string) => doCall('uninstall', { name, sessionId })
+  const deleteSkill = (name: string) => { setConfirmName(null); doCall('deleteSkill', { name, sessionId }) }
+
+  /** 破坏性动作 + 二次确认。confirmName 是单值，所以同一时刻只有一个动作在确认态。 */
+  const DangerDelete = ({ name, source }: { name: string; source: string }) => (
+    confirmName === name
+      ? (
+        <>
+          <Btn label="确认删除" kind="danger" onClick={(e) => { e.stopPropagation(); deleteSkill(name) }} />
+          <Btn label="取消" onClick={(e) => { e.stopPropagation(); setConfirmName(null) }} />
+        </>
+      )
+      : (
+        <Btn
+          label="删除"
+          kind="danger"
+          title={`把 ${name} 移入 trash 后彻底删除，不可恢复（来源：${source}）`}
+          onClick={(e) => { e.stopPropagation(); setConfirmName(name) }}
+        />
+      )
+  )
   const reinstall = (name: string) => doCall('reinstall', { name, sessionId })
   const deleteTrash = (name: string) => { setConfirmName(null); doCall('deleteTrash', { name, sessionId }) }
   const removeSkill = (name: string) => doCall('unregister', { name, sessionId })
@@ -319,7 +340,14 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
         {profiled || !fsSkill ? null : <Btn label="建档" onClick={(e) => { e.stopPropagation(); ingest(s.name) }} />}
         {s.owned
           ? <Btn label="卸载" kind="danger" onClick={(e) => { e.stopPropagation(); removeSkill(s.name) }} />
-          : fsSkill ? <Btn label="停用" onClick={(e) => { e.stopPropagation(); uninstall(s.name) }} /> : null}
+          : fsSkill
+            ? (
+              <>
+                <Btn label="停用" title="移入 trash，可重装" onClick={(e) => { e.stopPropagation(); uninstall(s.name) }} />
+                <DangerDelete name={s.name} source={s.source} />
+              </>
+            )
+            : null}
       </div>
     )
   }
@@ -521,7 +549,14 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
                     : <Btn label="删除" kind="danger" onClick={() => setConfirmName(name)} />}
                 </>
               )
-              : active ? <Btn label="停用" onClick={() => uninstall(name)} /> : null}
+              : active
+                ? (
+                  <>
+                    <Btn label="停用" title="移入 trash，可重装" onClick={() => uninstall(name)} />
+                    <DangerDelete name={name} source={sourceByName.get(name) ?? '文件系统'} />
+                  </>
+                )
+                : null}
           </div>
         </div>
       )

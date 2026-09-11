@@ -20,7 +20,7 @@ import { isAbsolute, join, relative, resolve as resolvePath } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { DIRECTION_LABELS, isDirectionLabel } from './directions.ts'
 import { formatReview, reviewCandidates } from './freshness.ts'
-import { recordUsage, skillGestures } from './usage.ts'
+import { dayKey, recordUsage, skillGestures, summarizeUsage } from './usage.ts'
 import { atomicReplaceCommand, fsEntryOf, isWithin, mkdirCommand, moveNoClobberCommand, removeFileCommand, removeRecursiveCommand, trashDirOf } from './files.ts'
 import { createRpcRoute } from './http.ts'
 import { createIndexStore } from './index-store.ts'
@@ -547,6 +547,67 @@ export function apply(ctx: Context, config?: Config): void {
         return { ok: true, message: `已记录技能 "${name}" 的评测结论：${conclusion}` }
       },
     })
+
+    tools.register({
+      name: 'skill_dossier',
+      description: '读取某个技能的档案（方向 / 使用范围 / 能力边界 / 应用场景 / 调用与实测情况）。技能目录里只有名称和描述，靠它无法判断边界——在决定加载某个技能全文之前，先用本工具读档案；没有档案就用 skill_archive 补一个。',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: '技能名（kebab-case），取自技能目录' },
+        },
+        required: ['name'],
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            text: { type: 'string' },
+          },
+        },
+        render: (_args: unknown, value: any) => [{ type: 'text', text: String(value.text ?? '') }],
+      },
+      async execute(args: any, exec: any): Promise<{ text: string }> {
+        const name = typeof args?.name === 'string' ? args.name.trim() : ''
+        if (!NAME_RE.test(name)) throw new Error(`无效的技能名：${name}`)
+        const agent = exec.agent as AgentLike | undefined
+        if (agent === undefined) throw new Error('无法确定当前会话')
+        const cwd = agent.session.header.cwd
+        const index = await readIndex(cwd)
+        const entry = index.skills[name]
+        if (entry === null || entry === undefined || typeof entry !== 'object') {
+          return { text: `技能「${name}」还没有档案。先读它的正文再调用 skill_archive 建档，之后这里就有边界与场景可查。` }
+        }
+        const usage = summarizeUsage(index.usage, Date.now()).find((item) => item.name === name)
+        const lines = [
+          `技能「${name}」的档案：`,
+          `方向：${entry.direction ?? '未标注'}`,
+          `使用范围：${entry.useScope ?? '—'}`,
+          `能力边界：${entry.boundaries ?? '—'}`,
+          `应用场景：${entry.scenarios ?? '—'}`,
+        ]
+        if (typeof entry.notes === 'string' && entry.notes !== '') lines.push(`备注：${entry.notes}`)
+        lines.push(`来源：${entry.origin ?? '未标注'} · 建档 ${entry.updatedAt === undefined ? '未知' : dayKey(entry.updatedAt)}${entry.reviewedAt === undefined ? '' : ` · 复审 ${dayKey(entry.reviewedAt)}`}`)
+        lines.push(usage === undefined
+          ? '调用：暂无记录'
+          : `调用：${usage.count} 次 · 活跃 ${usage.activeDays} 天 · 最近 ${dayKey(usage.lastUsedAt)}`)
+        if (entry.outcomes !== undefined) {
+          const failures = entry.outcomes.failed > 0
+            ? `，失败 ${entry.outcomes.failed} 次${entry.outcomes.lastError === undefined || entry.outcomes.lastError === '' ? '' : `（最近一次：${entry.outcomes.lastError}）`}`
+            : '，无失败'
+          lines.push(`实测：加载成功 ${entry.outcomes.loaded} 次${failures}`)
+        }
+        if (entry.evaluation !== undefined) {
+          lines.push(`评测：${entry.evaluation.conclusion}${entry.evaluation.score === null ? '' : ` · ${entry.evaluation.score}/10`}`)
+        }
+        const definition = await skills.get(name, { scope: agent as unknown, cwd })
+        if (definition !== undefined && typeof definition.description === 'string') {
+          lines.push(`注册表描述：${definition.description}`)
+        }
+        return { text: lines.join('\n') }
+      },
+    })
   }
 
   // ---------- HTTP RPC（浏览器半调用） ----------
@@ -829,6 +890,14 @@ export function apply(ctx: Context, config?: Config): void {
       })
       return { ok: true }
     },
+  }
+
+  /** 一步删除 = 停用（移入 trash）+ 彻底删除。复用两步各自的路径校验与失败回滚，
+   * 所以 rm 失败时技能还留在 trash 里，仍可重装；不做「直接 rm 源目录」的第二条路径。 */
+  handlers.deleteSkill = async (args: any) => {
+    const uninstalled = await handlers.uninstall!(args) as { ok: boolean; error?: string }
+    if (uninstalled.ok !== true) return uninstalled
+    return handlers.deleteTrash!(args)
   }
 
   const routeHandler = createRpcRoute({ handlers })

@@ -8,7 +8,7 @@ One package, three panels:
 
 | Panel | What it does |
 |---|---|
-| **Skills** | Browse, search, read details, one-click `/name` into the composer; disable (reversible trash) · reinstall · delete; session-scoped temporary skills |
+| **Skills** | Browse, search, read details, one-click `/name` into the composer; **disable** (reversible trash) · reinstall · **delete** (one step, confirmed); session-scoped temporary skills |
 | **Dossier** | Per-skill profile: direction (10 categories), use scope, capability boundaries, scenarios, origin, call stats, **observed load success/failure**, **catalog token cost**, freshness review, evaluation verdicts |
 | **Report** | Two read-only views — **daily** and **monthly** — over `reporter/brief/YYYY-MM-DD.md` |
 
@@ -17,6 +17,13 @@ One package, three panels:
 > It deliberately has **no retrospective, no export, no run history**: a retrospective is the agent's job (let it read the briefs), export is what copy-paste already does, and run history existed to serve a scheduler that does not exist. The plugin only reads — no writes, no state, one less failure surface.
 
 ## Why a "dossier"
+
+**Profiling has exactly one purpose: let both the AI and the human understand what each skill is for.**
+
+A skill catalog carries only a name and a description — no boundaries, no scenarios, no freshness. Humans end up reading files; the model ends up guessing. This plugin writes a dossier per skill that both sides can read:
+
+- **Humans**: filter by direction in the dossier panel; every card states use scope / capability boundaries / scenarios / origin / call history
+- **The AI**: the model reads a dossier by name with the `skill_dossier` tool — **before** committing to load a skill's full text
 
 Comparable plugins stop at "list them, toggle them". This one goes one step further: **it profiles each skill and verifies it with observation instead of the model's own claim.**
 
@@ -47,6 +54,7 @@ The repository **commits its `lib/` build artifacts**, so a git install works as
 
 | Tool | Purpose |
 |---|---|
+| `skill_dossier` | **Read** one skill's dossier (direction / scope / boundaries / scenarios / usage and observed outcomes); use it before loading a skill's full text |
 | `skill_archive` | Write a skill profile (direction / use scope / boundaries / scenarios / origin) |
 | `skill_review` | List skills due for review (freshness ranking) |
 | `record_eval` | Write an evaluation verdict (score / baselineDelta / conclusion) back into the dossier |
@@ -86,6 +94,7 @@ Windows / Linux / macOS. Lifecycle file operations emit pwsh (Windows, native `M
 
 - **Web profile only**: the host half hard-depends on the `webServer` service and cannot be installed headless.
 - **Call stats are observational**: only calls made while the plugin is running are counted; historical calls cannot be reconstructed. A failed stats write never interrupts a skill, but it is **no longer silent** — the panel shows the failure and its reason.
+- **Delete wraps two steps, it is not a second path**: move into trash, then remove recursively — both steps keep their own path checks and failure rollback, and a failed `rm` leaves the skill restorable in trash. Non-filesystem skills are refused.
 - **Lifecycle moves require one filesystem**: a skill entry and its trash directory on different mounts are refused safely before any file changes; there is no non-atomic copy-delete.
 - **Windows/Linux regressions are wired into CI** but only count as "actually run" once GitHub Actions is green.
 

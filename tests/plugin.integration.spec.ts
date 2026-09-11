@@ -167,8 +167,14 @@ function hostContext(options: {
       const normalized = String(target).replaceAll('\\', '/')
       if (normalized.endsWith('/.dsh/skill-manager/index.json')) {
         if (options.indexReadError !== undefined) throw options.indexReadError
-        if (options.indexText === undefined) throw Object.assign(new Error('missing'), { code: 'ENOENT' })
-        return options.indexText
+        // 显式给的 indexText 优先（多数用例用它）；没有就给真的落过盘的读回来，
+        // 否则「写入 → 再读」的多步流程会读到陈旧替身。
+        if (options.indexText !== undefined) return options.indexText
+        try {
+          return readFileSync(String(target), 'utf8')
+        } catch {
+          throw Object.assign(new Error('missing'), { code: 'ENOENT' })
+        }
       }
       for (const [suffix, content] of options.files ?? []) {
         if (normalized.endsWith(suffix)) return content
@@ -763,6 +769,67 @@ describe('single-package host activation', () => {
 
     expect(response).toEqual({ status: 200, body: { ok: false, error: '未找到该技能的停用记录' } })
     expect(writes).toEqual([])
+  })
+
+  it('deletes a filesystem skill in one step: trash it, then remove it', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'dsh-skill-dossier-delete-'))
+    const skillDir = join(base, 'skills', 'alpha')
+    const skillPath = join(skillDir, 'SKILL.md')
+    mkdirSync(skillDir, { recursive: true })
+    writeFileSync(skillPath, '# alpha')
+    try {
+      const { ctx, routes, shellCommands } = hostContext({
+        cwd: base,
+        skill: {
+          name: 'alpha',
+          description: 'test skill',
+          invocation: { modelInvocable: true, userInvocable: true },
+          source: 'custom',
+          provider: 'filesystem',
+          content: '# alpha',
+          path: skillPath,
+        },
+        // 这条用例走真实文件系统：临时索引必须真的落盘，原子替换才移得动。
+        writeText: async (target: unknown, content: string) => { writeFileSync(String(target), String(content)) },
+        shellRun: async (request) => runNativeCommand(request),
+      })
+      apply(ctx as never)
+
+      const response = await post(routes.get('/api/skill-manager')!, {
+        method: 'deleteSkill',
+        args: { sessionId: 'session-1', name: 'alpha' },
+      })
+
+      expect(response).toEqual({ status: 200, body: { ok: true } })
+      // 先移入 trash（生命周期移动），再递归删除——不做「直接 rm 源目录」的第二条路径。
+      expect(shellCommands.filter(isLifecycleMove)).toHaveLength(1)
+      expect(shellCommands.some((command) => command.replaceAll('\\', '/').includes('/skill-manager/trash/'))).toBe(true)
+      expect(shellCommands.some((command) => command.startsWith('rm -rf -- ') || command.startsWith('Remove-Item -Recurse'))).toBe(true)
+      expect(existsSync(skillDir)).toBe(false)
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses to delete a skill that is not filesystem-backed', async () => {
+    const { ctx, routes } = hostContext({
+      skill: {
+        name: 'alpha',
+        description: 'built-in',
+        invocation: { modelInvocable: true, userInvocable: true },
+        source: 'bundled',
+        provider: 'bundled',
+        content: '# alpha',
+      },
+    })
+    apply(ctx as never)
+
+    const response = await post(routes.get('/api/skill-manager')!, {
+      method: 'deleteSkill',
+      args: { sessionId: 'session-1', name: 'alpha' },
+    })
+
+    expect(response.body).toEqual({ ok: false, error: '该技能不是文件系统技能，无法停用' })
   })
 
   it('moves an uninstalled skill back when the index commit fails', async () => {

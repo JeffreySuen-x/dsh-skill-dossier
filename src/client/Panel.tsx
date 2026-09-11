@@ -585,13 +585,10 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
 
   const WEEKDAY_LABELS = ['一', '二', '三', '四', '五', '六', '日'] as const
 
-  /**
-   * 颜色四级 = 那天做了多少（一格一天，越深越多）。
-   * 阈值按本工作区实测标定：14 天里 4~150 条、中位 36 条；用相对分位会让
-   * 「20 条这周深、下周浅」，颜色就读不出绝对量了，所以用固定档。
-   * ponytail: 固定档在产量量级变化后会饱和；届时改成按区间分位数的自适应档。
-   */
+  // 色阶档位：9 / 29 / 59（按本工作区实测标定）。
   const HEAT_STEPS = [9, 29, 59] as const
+
+  /** 越深＝那天做得越多（GitHub 贡献图的绿阶）。 */
   const heatClass = (count: number): string => {
     if (count <= 0) return ''
     if (count <= HEAT_STEPS[0]) return ` ${css.heatL1}`
@@ -606,74 +603,30 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
     return `${date} · ${day.count} 条进展${who}`
   }
 
-  /** 周报：一行 7 格，一格一天。 */
-  const reportWeekStrip = (range: ReportRange) => {
+  const reportHeat = (range: ReportRange, showWeekday: boolean) => {
     const byDate = new Map(range.days.map((day) => [day.date, day]))
     return (
-      <div className={css.weekStrip}>
+      <div className={css.heatStrip}>
         {range.dates.map((date) => {
           const weekday = (new Date(`${date}T00:00:00`).getDay() + 6) % 7
+          const dayNum = Number(date.slice(8))
+          const showNum = showWeekday || dayNum === 1 || dayNum % 5 === 0
           return (
-            <div key={date} className={css.weekDay}>
-              <span className={`${css.heatCell}${heatClass(byDate.get(date)?.count ?? 0)}`} title={heatTitle(date, byDate.get(date))} />
-              <span className={css.weekDayLabel}>{WEEKDAY_LABELS[weekday]}</span>
-              <span className={css.weekDayNum}>{Number(date.slice(8))}</span>
+            <div key={date} className={css.heatDay}>
+              <span
+                className={`${css.heatCell}${heatClass(byDate.get(date)?.count ?? 0)}`}
+                title={heatTitle(date, byDate.get(date))}
+              />
+              <span className={css.heatDayLabel}>
+                {showWeekday ? WEEKDAY_LABELS[weekday] : (showNum ? dayNum : '')}
+              </span>
+              {showWeekday ? <span className={css.heatDayLabel}>{dayNum}</span> : null}
             </div>
           )
         })}
       </div>
     )
   }
-
-  /** 月报：GitHub 式日历，列＝周、行＝周一~周日，一格一天。 */
-  const reportMonthCalendar = (range: ReportRange) => {
-    const byDate = new Map(range.days.map((day) => [day.date, day]))
-    const weeks: Array<Array<string | null>> = []
-    let column: Array<string | null> = []
-    range.dates.forEach((date, index) => {
-      const weekday = (new Date(`${date}T00:00:00`).getDay() + 6) % 7
-      if (index === 0 && weekday > 0) column = Array.from({ length: weekday }, () => null)
-      column.push(date)
-      if (column.length === 7) {
-        weeks.push(column)
-        column = []
-      }
-    })
-    if (column.length > 0) {
-      while (column.length < 7) column.push(null)
-      weeks.push(column)
-    }
-    return (
-      <div className={css.heatGrid}>
-        <div className={css.heatWeekdays}>
-          {WEEKDAY_LABELS.map((label, index) => (
-            <span key={label}>{index % 2 === 0 ? label : ''}</span>
-          ))}
-        </div>
-        {weeks.map((week, weekIndex) => (
-          <div key={weekIndex} className={css.heatWeek}>
-            {week.map((date, dayIndex) => (
-              date === null
-                ? <span key={`empty-${dayIndex}`} className={css.heatBlank} />
-                : <span key={date} className={`${css.heatCell}${heatClass(byDate.get(date)?.count ?? 0)}`} title={heatTitle(date, byDate.get(date))} />
-            ))}
-          </div>
-        ))}
-      </div>
-    )
-  }
-
-  const reportHeatLegend = () => (
-    <div className={css.heatLegend}>
-      <span>少</span>
-      <span className={css.heatCell} title="0 条" />
-      <span className={`${css.heatCell} ${css.heatL1}`} title={`1~${HEAT_STEPS[0]} 条`} />
-      <span className={`${css.heatCell} ${css.heatL2}`} title={`${HEAT_STEPS[0] + 1}~${HEAT_STEPS[1]} 条`} />
-      <span className={`${css.heatCell} ${css.heatL3}`} title={`${HEAT_STEPS[1] + 1}~${HEAT_STEPS[2]} 条`} />
-      <span className={`${css.heatCell} ${css.heatL4}`} title={`${HEAT_STEPS[2] + 1} 条以上`} />
-      <span>多</span>
-    </div>
-  )
 
   /** 周报/月报的项目卡：作用 / 进度 / 待办 / 难点，一行一项，不展开。 */
   const reportRangeProjects = (projects: RangeProject[]) => {
@@ -734,7 +687,6 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
       if (reportView !== 'daily' && 'dates' in data) {
         const range = data as ReportRange
         const title = reportView === 'weekly' ? '周报' : '月报'
-        const active = range.projects.length
         content = (
           <>
             <div className={css.reportSec}>
@@ -742,15 +694,9 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
                 {title} {range.label}
                 {range.fallbackFrom ? ` · 回退自 ${range.fallbackFrom}` : ''}
               </div>
-              <div className={css.hint}>
-                {range.days.length === 0
-                  ? '该区间暂无记录。'
-                  : `${range.days.length} 天有记录 · ${active} 个项目 · 一格一天，越深＝当天做得越多`}
-              </div>
               {range.days.length > 0
-                ? (reportView === 'weekly' ? reportWeekStrip(range) : reportMonthCalendar(range))
-                : null}
-              {reportHeatLegend()}
+                ? reportHeat(range, reportView === 'weekly')
+                : <div className={css.hint}>该区间暂无记录。</div>}
             </div>
             {reportRangeProjects(range.projects)}
           </>

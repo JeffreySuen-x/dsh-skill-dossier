@@ -1,6 +1,6 @@
 {
   "name": "dsh-skill-dossier",
-  "description": "DSH skill lifecycle and work-report plugin: catalog, routing, usage, lifecycle actions, plus daily/monthly/review/export reports from reporter/brief. Cross-platform design for Windows/Linux/macOS.",
+  "description": "DSH skill dossier and work report plugin: browse, search, archive, review and delete skills, and roll daily briefs into daily, weekly and monthly reports.",
   "version": "0.2.0",
   "packageManager": "pnpm@11.7.0",
   "type": "module",
@@ -41,6 +41,25 @@
     "node": "^22.19.0 || >=24.0.0"
   },
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JeffreySuen-x/dsh-skill-dossier.git"
+  },
+  "homepage": "https://github.com/JeffreySuen-x/dsh-skill-dossier#readme",
+  "bugs": {
+    "url": "https://github.com/JeffreySuen-x/dsh-skill-dossier/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "skill",
+    "skills",
+    "skill-management",
+    "dossier",
+    "report",
+    "cordis-plugin"
+  ],
   "peerDependencies": {
     "react": "^18.2.0"
   },

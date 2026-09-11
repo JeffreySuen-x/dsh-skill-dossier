@@ -1,6 +1,8 @@
 /**
- * Skills 管理面板：目录浏览/搜索/详情/调用/建档，档案页（方向筛选、
- * 未建档清单、档案卡片、停用/重装/删除）。
+ * Skills 管理面板：目录浏览/搜索/方向分类筛选/详情/调用/建档，档案页
+ * （方向筛选、未建档清单、档案卡片、停用/重装/删除）。
+ * 分类口径与档案页同轴（directions.ts 的 canonical 10 类 + 未建档），
+ * 逻辑在 skill-filter.ts 里，便于脱离 DOM 断言。
  * 组件自包含（按钮 + 弹层），无宿主 hook 依赖。
  */
 import { useEffect, useState } from 'react'
@@ -14,6 +16,7 @@ import type { IndexEntry, TrashRecord } from '../index-store.ts'
 import type { UsageRecord } from '../usage.ts'
 import css from './Panel.module.css'
 import { reportFailureMessage } from './report-state.ts'
+import { ALL_FILTER, UNPROFILED_FILTER, skillFilterChips, skillMatchesFilter } from './skill-filter.ts'
 
 const FS_SOURCES = ['project-dsh', 'project-agents', 'user-dsh', 'user-agents', 'custom']
 type Origin = 'self' | 'external' | 'system' | 'unknown'
@@ -144,6 +147,8 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
   const [view, setView] = useState<'list' | 'detail' | 'create'>('list')
   const [detail, setDetail] = useState<Detail | null>(null)
   const [filter, setFilter] = useState('all')
+  /** 「技能」页的方向分类筛选；与档案页的 filter 分开，两页的取值集合不同。 */
+  const [skillFilter, setSkillFilter] = useState(ALL_FILTER)
   const [confirmName, setConfirmName] = useState<string | null>(null)
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
@@ -298,6 +303,19 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
     </button>
   )
 
+  /** 分类 chip：技能页的分类与档案页的筛选共用同一套渲染，取值与命中口径各自传入。 */
+  const chip = (label: string, value: string, active: boolean, onPick: (value: string) => void, count?: number, title?: string) => (
+    <button
+      key={value}
+      type="button"
+      className={`${css.chip}${active ? ` ${css.chipActive}` : ''}`}
+      title={title}
+      onClick={() => onPick(value)}
+    >
+      {label}{count !== undefined ? ` ${count}` : ''}
+    </button>
+  )
+
   // ---------- 技能目录 ----------
 
   const row = (s: Summary) => {
@@ -333,7 +351,10 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
 
   const listBody = () => {
     const q = query.trim().toLowerCase()
-    const filtered = skills === null ? null : skills.filter((s) => {
+    const all = skills ?? []
+    const chips = skillFilterChips(all.map((s) => ({ name: s.name, direction: profiles[s.name]?.direction })))
+    const filtered = skills === null ? null : all.filter((s) => {
+      if (!skillMatchesFilter(skillFilter, profiles[s.name]?.direction)) return false
       if (q === '') return true
       return s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q)
     })
@@ -347,6 +368,13 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
           autoFocus
           onChange={(e) => setQuery(e.target.value)}
         />
+        {skills === null
+          ? null
+          : (
+            <div className={css.chips}>
+              {chips.map((c) => chip(c.label, c.value, skillFilter === c.value, setSkillFilter, c.count, DIRECTION_HINTS[c.value]))}
+            </div>
+          )}
         {skills === null
           ? <div className={css.hint}>加载中…</div>
           : filtered !== null && filtered.length === 0
@@ -412,18 +440,6 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
     }
     const directionOptions = Array.from(directionSet)
 
-    const chip = (label: string, value: string, count?: number, title?: string) => (
-      <button
-        key={value}
-        type="button"
-        className={`${css.chip}${filter === value ? ` ${css.chipActive}` : ''}`}
-        title={title}
-        onClick={() => setFilter(value)}
-      >
-        {label}{count !== undefined ? ` ${count}` : ''}
-      </button>
-    )
-
     const profileCard = (name: string) => {
       const p = profiles[name]
       if (p === undefined) return null
@@ -431,7 +447,7 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
       const trashed = Object.prototype.hasOwnProperty.call(trash, name)
       const origin = p.origin ?? 'unknown'
       const profiled = p.direction !== undefined && p.direction !== ''
-      const visible = filter === 'all'
+      const visible = filter === ALL_FILTER
         || (filter === 'active' && active)
         || (filter === 'trashed' && trashed)
         || (filter === p.direction)
@@ -502,12 +518,12 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
     return (
       <>
         <div className={css.chips}>
-          {chip('全部', 'all')}
-          {chip('未建档', 'unprofiled', unprofiled.length)}
-          {chip('启用中', 'active')}
-          {chip('已停用', 'trashed', trashedNames.length)}
-          {directionOptions.map((d) => chip(d, d, undefined, DIRECTION_HINTS[d]))}
-          {ORIGIN_KEYS.map((k) => chip(ORIGIN_LABELS[k], k))}
+          {chip('全部', ALL_FILTER, filter === ALL_FILTER, setFilter)}
+          {chip('未建档', UNPROFILED_FILTER, filter === UNPROFILED_FILTER, setFilter, unprofiled.length)}
+          {chip('启用中', 'active', filter === 'active', setFilter)}
+          {chip('已停用', 'trashed', filter === 'trashed', setFilter, trashedNames.length)}
+          {directionOptions.map((d) => chip(d, d, filter === d, setFilter, undefined, DIRECTION_HINTS[d]))}
+          {ORIGIN_KEYS.map((k) => chip(ORIGIN_LABELS[k], k, filter === k, setFilter))}
         </div>
         <div className={css.hint}>
           目录成本合计 ≈{catalogTokens} tokens：{profiledNames.length} 条档案对应的技能目录会整段进系统提示，越靠前的技能越占预算。
@@ -531,7 +547,7 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
             ))}
           </div>
         ) : null}
-        {(filter === 'all' || filter === 'unprofiled') && unprofiled.length > 0 ? (
+        {(filter === ALL_FILTER || filter === UNPROFILED_FILTER) && unprofiled.length > 0 ? (
           <div className={css.section}>
             <div className={css.sectionTitle}>新加入/未建档（{unprofiled.length}）</div>
             {unprofiled.map((s) => (

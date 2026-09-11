@@ -8,7 +8,7 @@ One package, three panels:
 
 | Panel | What it does |
 |---|---|
-| **Skills** | Browse, search, read details, one-click `/name` into the composer; **disable** (reversible trash) · reinstall · **delete** (one step, confirmed) |
+| **Skills** | Browse, search, **filter by direction category** (same axis as the dossier panel), read details, one-click `/name` into the composer; **disable** (reversible trash) · reinstall · **delete** (one step, confirmed) |
 | **Dossier** | Per-skill profile: direction (10 categories), use scope, capability boundaries, scenarios, origin, call stats, **observed load success/failure**, **catalog token cost**, freshness review |
 | **Report** | Three read-only views — **daily** (detail), **weekly** (Mon–Sun) and **monthly** — over `reporter/brief/YYYY-MM-DD.md`. Weekly and monthly are a **contribution graph plus one-line status per project** |
 

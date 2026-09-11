@@ -86,35 +86,6 @@ interface ReportMonthly {
 }
 type ReportData = ReportDaily | ReportMonthly
 type ReportView = 'daily' | 'monthly'
-/** 复盘结构化产物（与 host 的 validateReviewReport 契约一致）。 */
-interface ReviewReport {
-  period: string
-  projects: string[]
-  completed: string[]
-  learnings: string[]
-  next: string[]
-  openQuestions: string[]
-  sourceBriefs: string[]
-}
-/** 一次复盘的运行记录（host 侧内存态）。 */
-interface ReportRun {
-  id: string
-  date: string
-  status: 'running' | 'done' | 'failed' | 'cancelled'
-  startedAt: number
-  endedAt?: number
-  skill: string
-  dispatch: 'session' | 'subagent'
-  markdownPath: string
-  jsonPath: string
-  artifact?: 'json' | 'markdown'
-  report?: ReviewReport
-  structuredError?: string
-  error?: string
-  elapsedMs?: number
-}
-interface ReportHistoryEntry { date: string; markdown: boolean; json: boolean }
-
 async function rpc<T = unknown>(method: string, args?: unknown): Promise<T> {
   const res = await fetch('/api/skill-manager', {
     method: 'POST',
@@ -171,11 +142,7 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
   const [reportView, setReportView] = useState<ReportView>('daily')
   const [reportData, setReportData] = useState<ReportData | null>(null)
   const [reportLoading, setReportLoading] = useState(false)
-  const [reportBusy, setReportBusy] = useState(false)
   const [reportError, setReportError] = useState('')
-  const [reportNotice, setReportNotice] = useState('')
-  const [reportRun, setReportRun] = useState<ReportRun | null>(null)
-  const [reportHistory, setReportHistory] = useState<ReportHistoryEntry[]>([])
 
   const reload = () => {
     setData(null)
@@ -639,7 +606,6 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
   const loadReport = (view: ReportView = reportView) => {
     setReportLoading(true)
     setReportError('')
-    setReportNotice('')
     setReportData(null)
     const method = view === 'monthly' ? 'generateMonthly' : 'generateDaily'
     reportRpc<ReportData>(method, { sessionId })
@@ -654,134 +620,6 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
         setReportLoading(false)
       })
       .catch((error: unknown) => { setReportError(String(error)); setReportLoading(false) })
-  }
-
-  const loadRuns = () => {
-    reportRpc<{ ok: boolean; runs?: ReportRun[]; history?: ReportHistoryEntry[] }>('reviewRuns', { sessionId })
-      .then((res) => {
-        if (res?.ok !== true) return
-        const live = res.runs ?? []
-        setReportHistory(res.history ?? [])
-        const active = live.find((run) => run.status === 'running') ?? live[0] ?? null
-        setReportRun(active)
-      })
-      .catch(() => undefined)
-  }
-
-  const refreshRun = (runId: string) => {
-    reportRpc<{ ok: boolean; run?: ReportRun | null }>('reviewStatus', { sessionId, runId })
-      .then((res) => { if (res?.ok === true && res.run != null) setReportRun(res.run) })
-      .catch(() => undefined)
-  }
-
-  const startReview = () => {
-    setReportBusy(true)
-    setReportError('')
-    setReportNotice('')
-    reportRpc<{ ok: boolean; runId?: string; message?: string; error?: string }>('review', { sessionId })
-      .then((res) => {
-        setReportBusy(false)
-        if (res?.ok === true && typeof res.runId === 'string') {
-          setReportNotice(res.message ?? '已触发复盘')
-          refreshRun(res.runId)
-        } else {
-          setReportError(res?.error ?? '复盘失败')
-        }
-      })
-      .catch((error: unknown) => { setReportBusy(false); setReportError(String(error)) })
-  }
-
-  const stopTracking = () => {
-    if (reportRun === null) return
-    reportRpc<{ ok: boolean; error?: string }>('cancelReview', { sessionId, runId: reportRun.id })
-      .then(() => refreshRun(reportRun.id))
-      .catch((error: unknown) => setReportError(String(error)))
-  }
-
-  const appendToBrief = (project: string, values: string[]) => {
-    reportRpc<{ ok: boolean; path?: string; appended?: number; error?: string }>('appendBrief', {
-      sessionId,
-      date: reportRun?.date,
-      project,
-      items: { progress: values },
-    })
-      .then((res) => setReportNotice(res?.ok === true ? `已追加 ${res.appended ?? 0} 条到 ${res.path}` : (res?.error ?? '追加失败')))
-      .catch((error: unknown) => setReportError(String(error)))
-  }
-
-  // 复盘运行中每 2 秒问一次宿主：产物落盘了没有（完成判据是产物，不是轮次结束）。
-  useEffect(() => {
-    if (reportRun?.status !== 'running') return
-    const timer = setTimeout(() => refreshRun(reportRun.id), 2000)
-    return () => clearTimeout(timer)
-  }, [reportRun, sessionId])
-
-  const runExport = () => {
-    setReportBusy(true)
-    setReportError('')
-    setReportNotice('')
-    reportRpc<{ ok: boolean; error?: string; jsonPath?: string; mdPath?: string }>('export', { sessionId, view: reportView })
-      .then((res) => {
-        setReportBusy(false)
-        setReportNotice(res?.ok ? `已导出：${res.mdPath}、${res.jsonPath}` : (res?.error ?? '导出失败'))
-      })
-      .catch((error: unknown) => { setReportBusy(false); setReportError(String(error)) })
-  }
-
-  /** 复盘运行状态：只报事实——产物落盘才算完成，超时就是超时。 */
-  const reportRunPanel = () => {
-    const run = reportRun
-    if (run === null) return null
-    const seconds = Math.round((run.elapsedMs ?? 0) / 1000)
-    const label = run.status === 'running' ? `复盘进行中（${seconds}s）`
-      : run.status === 'done' ? '复盘完成'
-        : run.status === 'cancelled' ? '已停止跟踪' : '复盘失败'
-    return (
-      <div className={css.reportSec}>
-        <div className={css.sectionTitle}>{label}</div>
-        {run.status === 'done' ? (
-          <div className={css.hint}>
-            产物：{run.artifact === 'json' ? run.jsonPath : run.markdownPath}
-            {run.artifact === 'json' ? `（结构化，另有 ${run.markdownPath}）` : ''}
-          </div>
-        ) : null}
-        {run.structuredError !== undefined ? (
-          <div className={css.hint}>结构化产物不合约，已回退 markdown：{run.structuredError}</div>
-        ) : null}
-        {run.error !== undefined ? <div className={css.hint}>{run.error}</div> : null}
-        {run.status === 'running' ? (
-          <div className={css.detailActions}>
-            <button type="button" className={css.reportViewBtn} onClick={stopTracking}>停止跟踪</button>
-          </div>
-        ) : null}
-        {run.report !== undefined ? (
-          <>
-            <div className={css.hint}>{run.report.period}</div>
-            {([['完成', run.report.completed], ['收获', run.report.learnings], ['下一步', run.report.next], ['待解', run.report.openQuestions]] as const).map(([title, items]) => (
-              <div key={title}>
-                <div className={css.sectionTitle}>{title}</div>
-                <ul>{reportItems([...items], '（无）')}</ul>
-              </div>
-            ))}
-            {run.report.projects.length > 0 && run.report.next.length > 0 ? (
-              <div className={css.detailActions}>
-                {run.report.projects.slice(0, 3).map((project) => (
-                  <button
-                    key={project}
-                    type="button"
-                    className={css.reportViewBtn}
-                    title={`把「下一步」追加进 ${project} 的今日进度（只追加，不改写）`}
-                    onClick={() => appendToBrief(project, run.report!.next)}
-                  >
-                    回写 {project}
-                  </button>
-                ))}
-              </div>
-            ) : null}
-          </>
-        ) : null}
-      </div>
-    )
   }
 
   const reportItems = (items: string[] | undefined, empty: string) => {
@@ -870,25 +708,10 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
     return (
       <div className={css.reportBody}>
         <div className={css.reportActions}>
-          <button type="button" className={`${css.reportViewBtn}${reportView === 'daily' ? ` ${css.reportViewBtnActive}` : ''}`} disabled={reportBusy} onClick={() => { setReportView('daily'); loadReport('daily') }}>日报</button>
-          <button type="button" className={`${css.reportViewBtn}${reportView === 'monthly' ? ` ${css.reportViewBtnActive}` : ''}`} disabled={reportBusy} onClick={() => { setReportView('monthly'); loadReport('monthly') }}>月度</button>
-          <button type="button" className={css.reportViewBtn} disabled={reportBusy || reportRun?.status === 'running'} onClick={startReview}>复盘</button>
-          <button type="button" className={css.reportViewBtn} disabled={reportBusy} onClick={runExport}>导出</button>
-          <button type="button" className={css.reportViewBtn} disabled={reportBusy} onClick={loadRuns}>运行记录</button>
+          <button type="button" className={`${css.reportViewBtn}${reportView === 'daily' ? ` ${css.reportViewBtnActive}` : ''}`} onClick={() => { setReportView('daily'); loadReport('daily') }}>日报</button>
+          <button type="button" className={`${css.reportViewBtn}${reportView === 'monthly' ? ` ${css.reportViewBtnActive}` : ''}`} onClick={() => { setReportView('monthly'); loadReport('monthly') }}>月度</button>
         </div>
-        {reportNotice !== '' ? <div className={css.reportNotice}>{reportNotice}</div> : null}
         {reportError !== '' ? <div className={css.notice}>{reportError}</div> : null}
-        {reportRunPanel()}
-        {reportHistory.length > 0 ? (
-          <div className={css.reportSec}>
-            <div className={css.sectionTitle}>复盘历史（{reportHistory.length}）</div>
-            {reportHistory.slice(0, 10).map((entry) => (
-              <div key={entry.date} className={css.hint}>
-                {entry.date} · {entry.markdown ? '复盘 md' : ''}{entry.json ? `${entry.markdown ? ' + ' : ''}结构化 json` : ''}
-              </div>
-            ))}
-          </div>
-        ) : null}
         {content}
       </div>
     )

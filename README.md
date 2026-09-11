@@ -10,9 +10,11 @@
 |---|---|
 | **技能** | 浏览、搜索、看详情、一键把 `/name` 填进输入框；文件夹技能的停用（进 trash，可逆）· 重装 · 彻底删除；会话级临时技能试写 |
 | **档案** | 每个技能的**档案**：方向（10 类）、使用范围、能力边界、应用场景、来源标注、调用统计、**实测成败**、**目录 token 成本**、保鲜复审、评测结论 |
-| **汇报** | 读 `reporter/brief/YYYY-MM-DD.md` 出日报/月度；**复盘**（按名调用 skill、可追踪、可停止跟踪）、结构化产物、**回写 brief**、导出 md/json、可选的定时复盘 |
+| **汇报** | 只读两个视图：**日报**与**月度**，数据源是 `reporter/brief/YYYY-MM-DD.md` |
 
 > 汇报是**可选模块**：`dataRoot` 可配置，默认读工作区里的 `reporter/brief/`；不去用就只是一块没人点的面板，不影响技能与档案。
+>
+> 汇报**不做**复盘、导出、运行记录：复盘是 agent 该干的事（让它直接读 brief），导出是复制粘贴能替代的，运行记录是给不存在的调度器准备的。插件只管读，不写、不留状态、不多一个失败面。
 
 ## 为什么是「档案」
 
@@ -59,17 +61,8 @@ dsh plugin --profile web add link:/绝对路径/dsh-skill-dossier
 - id: skill-dossier
   config:
     report:
-      dataRoot: reporter        # 汇报数据根目录
-      briefDir: brief           # 每日简报目录
-      reviewDir: Review         # 复盘产物目录
-      exportDir: export         # 导出目录
-      reviewSkill: aeon-review  # 复盘按名加载的 skill（留空则只用内联步骤）
-      dispatch: session         # session | subagent（复盘是否派给子代理）
-      runTimeoutMs: 600000      # 单次复盘等产物的上限
-      schedule:
-        enabled: false          # 定时复盘，默认关闭
-        hour: 22                # 当天几点之后才触发
-        checkMinutes: 30        # 每多少分钟检查一次
+      dataRoot: reporter   # 汇报数据根目录
+      briefDir: brief      # 每日简报目录
 ```
 
 注意：DSH 的 patch 层是**整体替换** config 而不是合并，所以覆盖时请把要改的键写全（未写的键会走代码里的默认值）。
@@ -93,12 +86,8 @@ Windows / Linux / macOS。文件生命周期操作按平台生成 pwsh（Windows
 
 - **仅 web profile**：host 半硬依赖 `webServer` 服务，headless 装不了。
 - **调用统计是观察数据**：只统计插件运行期间发生的调用，历史调用无法回溯补记。埋点写盘失败不会打断技能本身，但**不再静默**——面板顶部会显示「调用统计写盘失败」及原因。
-- **复盘的完成判据是产物落盘**，不是「某一轮对话结束了」。DSH 的 prompt 回执不等于 turn 结束，靠 MessageId 关联轮次在并发工作时会串台，所以本插件只问一件事：入队前后产物内容变了没有。代价是：agent 什么都没写时，要等满 `runTimeoutMs` 才报超时。
-- **「停止跟踪」不等于中断**：它会停止状态跟踪并记账，但**不会**打断 agent 已在执行的那一轮。
-- **定时复盘只在 DSH 进程存活期间生效**，且需要该工作区最近有过会话；无当天新增内容不触发，错过不补跑。默认关闭。
 - **生命周期移动要求同文件系统**：技能条目与 trash 目录跨挂载点时会在改文件前安全拒绝，不做非原子的 copy-delete。
 - **Windows/Linux 回归已写入 CI**，但只有在 GitHub Actions 真绿之后才算「实跑通过」。
-- 复盘的结构化产物（`<reviewDir>/<date>.json`）**写入时校验**：七个键必须齐全且不得多键；不合约就回退渲染 markdown，不会因为契约漂移白屏。
 
 ## 许可
 

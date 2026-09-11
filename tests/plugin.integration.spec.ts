@@ -899,18 +899,13 @@ describe('single-package host activation', () => {
       expect.objectContaining({ name: '管理插件', progress: ['单包汇报'] }),
     ])
 
+    // 汇报只剩两个只读视图：写入与 agent 触发都必须不存在。
     const exported = await post(route, { method: 'export', args: { sessionId: 'session-1', view: 'monthly' } })
-    expect(exported.body).toEqual(expect.objectContaining({ ok: true }))
-    expect(writes.map((write) => write.target).sort()).toEqual([
-      expect.stringMatching(/report-monthly-\d{4}-\d{2}\.json$/),
-      expect.stringMatching(/report-monthly-\d{4}-\d{2}\.md$/),
-    ])
-    expect(writes.some((write) => write.content.includes('单包汇报'))).toBe(true)
-
+    expect(exported.status).toBe(404)
     const reviewed = await post(route, { method: 'review', args: { sessionId: 'session-1' } })
-    expect(reviewed.body).toEqual(expect.objectContaining({ ok: true }))
-    expect(JSON.stringify(followups)).toContain('reporter/brief/ 目录下所有 YYYY-MM-DD.md')
-    expect(JSON.stringify(followups)).not.toContain('brief-YYYY-MM-DD.md')
+    expect(reviewed.status).toBe(404)
+    expect(writes).toEqual([])
+    expect(followups).toEqual([])
   })
 
   it('treats a missing brief directory as an empty first-run report', async () => {
@@ -927,109 +922,3 @@ describe('single-package host activation', () => {
   })
 })
 
-describe('report review runs', () => {
-  const report = {
-    period: '2026-09-01 ~ 2026-09-11',
-    projects: ['管理插件'],
-    completed: ['修好索引写路径'],
-    learnings: ['沙箱策略必须显式传'],
-    next: ['补 CI'],
-    openQuestions: [],
-    sourceBriefs: ['2026-09-11.md'],
-  }
-
-  function reviewHarness(options: {
-    files?: Map<string, string>
-    writeText?: (target: unknown, content: string) => Promise<void>
-    reportConfig?: unknown
-  } = {}) {
-    const followups: unknown[] = []
-    const host = hostContext({
-      files: options.files ?? new Map(),
-      followup: (message) => { followups.push(message) },
-      ...(options.writeText === undefined ? {} : { writeText: options.writeText }),
-    })
-    apply(host.ctx as never, { report: options.reportConfig } as never)
-    return { ...host, followups, route: host.routes.get('/api/report')! }
-  }
-
-  it('completes a run from the artifact appearing, never from a turn boundary', async () => {
-    const files = new Map<string, string>()
-    const host = reviewHarness({ files })
-    const date = currentDateKey()
-
-    const started = await post(host.route, { method: 'review', args: { sessionId: 'session-1' } })
-    expect(started.body).toMatchObject({ ok: true })
-    expect(typeof started.body.runId).toBe('string')
-
-    const running = await post(host.route, { method: 'reviewStatus', args: { sessionId: 'session-1', runId: started.body.runId } })
-    expect(running.body.run.status).toBe('running')
-
-    files.set(`reporter/Review/${date}.json`, JSON.stringify(report))
-    const done = await post(host.route, { method: 'reviewStatus', args: { sessionId: 'session-1', runId: started.body.runId } })
-    expect(done.body.run).toMatchObject({ status: 'done', artifact: 'json', report })
-    expect(done.body.run.baseline).toBeUndefined()
-  })
-
-  it('falls back to the markdown artifact when the structured contract drifts', async () => {
-    const files = new Map<string, string>()
-    const host = reviewHarness({ files })
-    const date = currentDateKey()
-
-    const started = await post(host.route, { method: 'review', args: { sessionId: 'session-1' } })
-    files.set(`reporter/Review/${date}.json`, '{"period":"x"}')
-    files.set(`reporter/Review/${date}.md`, '# 复盘\n正文')
-
-    const done = await post(host.route, { method: 'reviewStatus', args: { sessionId: 'session-1', runId: started.body.runId } })
-    expect(done.body.run).toMatchObject({ status: 'done', artifact: 'markdown' })
-    expect(String(done.body.run.structuredError)).toContain('缺少键')
-    expect(done.body.run.report).toBeUndefined()
-  })
-
-  it('fails a run that produces no artifact before the timeout', async () => {
-    const host = reviewHarness({ reportConfig: { runTimeoutMs: 1 } })
-    const started = await post(host.route, { method: 'review', args: { sessionId: 'session-1' } })
-    await new Promise((resolve) => setTimeout(resolve, 10))
-
-    const status = await post(host.route, { method: 'reviewStatus', args: { sessionId: 'session-1', runId: started.body.runId } })
-    expect(status.body.run.status).toBe('failed')
-    expect(String(status.body.run.error)).toContain('超时')
-  })
-
-  it('stops tracking on request without claiming the agent turn was aborted', async () => {
-    const host = reviewHarness()
-    const started = await post(host.route, { method: 'review', args: { sessionId: 'session-1' } })
-
-    const cancelled = await post(host.route, { method: 'cancelReview', args: { sessionId: 'session-1', runId: started.body.runId } })
-    expect(cancelled.body).toEqual({ ok: true })
-
-    const status = await post(host.route, { method: 'reviewStatus', args: { sessionId: 'session-1', runId: started.body.runId } })
-    expect(status.body.run.status).toBe('cancelled')
-    expect(String(status.body.run.error)).toContain('不会被中断')
-  })
-
-  it('appends review output into the brief without rewriting existing lines', async () => {
-    const date = currentDateKey()
-    const original = `---\ndate: ${date}\n---\n\n# Brief\n\n## 管理插件\n- 作用：管理技能\n- 今日进度：\n  1. 旧进度\n- 待办：\n- 问题：\n`
-    const files = new Map([[`reporter/brief/${date}.md`, original]])
-    const written: string[] = []
-    const host = reviewHarness({
-      files,
-      writeText: async (target, content) => { written.push(`${String(target)}::${String(content)}`) },
-    })
-
-    const result = await post(host.route, {
-      method: 'appendBrief',
-      args: { sessionId: 'session-1', date, project: '管理插件', items: { progress: ['新进度'], issues: ['待验证'] } },
-    })
-
-    expect(result.body).toMatchObject({ ok: true, appended: 2 })
-    const content = written.find((entry) => entry.includes('brief'))!.split('::')[1]!
-    expect(content).toContain('  1. 旧进度\n  2. 新进度')
-    expect(content).toContain('- 问题：\n  1. 待验证')
-    expect(content).toContain('- 作用：管理技能')
-    // 去掉新插入的两行后，必须与原文逐字节一致：只追加，不改写。
-    const stripped = content.split('\n').filter((line) => !line.includes('新进度') && !line.includes('待验证')).join('\n')
-    expect(stripped).toBe(original)
-  })
-})

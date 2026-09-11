@@ -1,4 +1,20 @@
-import { type ReportConfig, type ReviewReport } from './report-runs.ts';
+/**
+ * 汇报只做一件事：把 `reporter/brief/` 里的每日简报读出来，按日或按月摊平。
+ *
+ * 这里刻意没有「复盘 / 导出 / 运行记录」——复盘是 agent 干的事（让 agent 直接读
+ * brief），导出是复制粘贴能替代的，运行记录是给一个不存在的调度器准备的。
+ * 三者都要额外状态、额外写盘、额外失败面，而日报/月度本身只需要读。
+ */
+/** 数据目录可配置，默认就是历史行为。 */
+export interface ReportConfig {
+    /** 数据根目录（相对于工作区）。 */
+    dataRoot: string;
+    /** 每日简报目录名（dataRoot 之下）。 */
+    briefDir: string;
+}
+export declare const DEFAULT_REPORT_CONFIG: ReportConfig;
+/** 归一化插件 config：缺失或非法一律退回默认值。 */
+export declare function normalizeReportConfig(raw: unknown): ReportConfig;
 export interface ReportProject {
     name: string;
     purpose: string;
@@ -15,9 +31,7 @@ export interface ReportFsLike {
     listDir(target: unknown): Promise<Array<{
         name?: string;
         path?: string;
-        target?: unknown;
     }>>;
-    writeText(target: unknown, content: string, expected?: unknown, signal?: unknown, policy?: unknown): Promise<unknown>;
 }
 interface ReportAgentLike {
     session: {
@@ -25,15 +39,9 @@ interface ReportAgentLike {
             cwd: string;
         };
     };
-    followup(message: unknown): void;
 }
 export interface ReportAgentsLike {
     get(id: string): ReportAgentLike | undefined;
-}
-export interface ReportSandboxPolicyLike {
-    resolve(request?: {
-        session?: unknown;
-    }): unknown;
 }
 interface ReportRouteLike {
     kind: 'exact';
@@ -46,38 +54,12 @@ export interface ReportWebServerLike {
 interface EffectContextLike {
     effect(setup: () => () => void): unknown;
 }
-/** 一次复盘的运行记录（内存态；产物落盘才是完成判据）。 */
-export interface ReviewRun {
-    id: string;
-    date: string;
-    status: 'running' | 'done' | 'failed' | 'cancelled';
-    startedAt: number;
-    endedAt?: number;
-    skill: string;
-    dispatch: 'session' | 'subagent';
-    markdownPath: string;
-    jsonPath: string;
-    /** 完成时产物里带了哪一份。 */
-    artifact?: 'json' | 'markdown';
-    report?: ReviewReport;
-    /** 结构化产物不合约时的原因（不致命：回退 markdown）。 */
-    structuredError?: string;
-    error?: string;
-    /** 入队时两份产物的内容快照——「内容变了」才算完成，仅内部使用。 */
-    baseline?: {
-        json?: string | undefined;
-        markdown?: string | undefined;
-    };
-}
 export interface ReportDependencies {
     webServer: ReportWebServerLike;
     agents: ReportAgentsLike;
     fs: ReportFsLike;
-    sandboxPolicy: ReportSandboxPolicyLike;
     ensureDirectories(cwd: string, sessionId: string, config: ReportConfig): Promise<void>;
     config?: ReportConfig;
-    /** cordis timer 服务；缺失则定时复盘不可用（不影响手动复盘）。 */
-    interval?: (callback: () => void, delayMs: number) => () => void;
 }
 /** Parse the brief skill's stable markdown contract. */
 export declare function parseBrief(text: string): ReportProject[];

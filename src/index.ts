@@ -25,8 +25,7 @@ import { atomicReplaceCommand, fsEntryOf, isWithin, mkdirCommand, moveNoClobberC
 import { isCrossSiteRequest, readJsonBody, respondJson } from './http.ts'
 import { createIndexStore } from './index-store.ts'
 import { estimateSkillTokens } from './tokens.ts'
-import { registerReportApi, type ReportAgentsLike, type ReportFsLike, type ReportSandboxPolicyLike, type ReportWebServerLike } from './report.ts'
-import { normalizeReportConfig } from './report-runs.ts'
+import { normalizeReportConfig, registerReportApi, type ReportAgentsLike, type ReportFsLike, type ReportWebServerLike } from './report.ts'
 
 /** 与 base bundle 选择 bash/pwsh 的分支一致（process.platform === 'win32'）。 */
 const IS_WINDOWS = process.platform === 'win32'
@@ -883,24 +882,17 @@ export function apply(ctx: Context, config?: Config): void {
   }
   if (webServer !== undefined && agents !== undefined && fs !== undefined && sandboxPolicy !== undefined) {
     const reportConfig = normalizeReportConfig(config?.report)
-    const timer = ctx.get('timer') as { interval?: (callback: () => void, delay: number) => () => void } | undefined
     registerReportApi(ctx, {
       webServer: webServer as unknown as ReportWebServerLike,
       agents: agents as unknown as ReportAgentsLike,
       fs: fs as unknown as ReportFsLike,
-      sandboxPolicy: sandboxPolicy as unknown as ReportSandboxPolicyLike,
       config: reportConfig,
-      ...(typeof timer?.interval === 'function'
-        ? { interval: (callback: () => void, delayMs: number) => timer.interval!(callback, delayMs) }
-        : {}),
       ensureDirectories: async (cwd, sessionId, active) => {
         const agent = agents.get(sessionId)
         if (agent === undefined) throw new Error('找不到对应 agent（会话可能已结束）')
         const policy = sandboxPolicy.resolve({ session: agent.session })
-        for (const dir of [active.briefDir, active.reviewDir, active.exportDir]) {
-          const target = join(cwd, active.dataRoot, dir)
-          await runShell(mkdirCommand(target, IS_WINDOWS), target, policy)
-        }
+        const target = join(cwd, active.dataRoot, active.briefDir)
+        await runShell(mkdirCommand(target, IS_WINDOWS), target, policy)
       },
     })
   }

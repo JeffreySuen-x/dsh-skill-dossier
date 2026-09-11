@@ -15,7 +15,6 @@ import type { UsageRecord } from '../usage.ts'
 import css from './Panel.module.css'
 import { reportFailureMessage } from './report-state.ts'
 
-const NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const FS_SOURCES = ['project-dsh', 'project-agents', 'user-dsh', 'user-agents', 'custom']
 type Origin = 'self' | 'external' | 'system' | 'unknown'
 const ORIGIN_LABELS: Record<Origin, string> = { self: '自创', external: '外来', system: '系统', unknown: '未标注' }
@@ -86,8 +85,9 @@ interface ReportMonthly {
 }
 type ReportData = ReportDaily | ReportMonthly
 type ReportView = 'daily' | 'monthly'
-async function rpc<T = unknown>(method: string, args?: unknown): Promise<T> {
-  const res = await fetch('/api/skill-manager', {
+/** 两个 host 路由共用一个 JSON-RPC 客户端。 */
+async function rpc<T = unknown>(path: string, method: string, args?: unknown): Promise<T> {
+  const res = await fetch(path, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ method, args }),
@@ -103,6 +103,9 @@ async function rpc<T = unknown>(method: string, args?: unknown): Promise<T> {
   }
   return data as T
 }
+
+const MANAGER_API = '/api/skill-manager'
+const REPORT_API = '/api/report'
 
 function normalizeList(res: unknown): ListResult {
   const r = (res ?? {}) as { skills?: unknown; index?: unknown; usageHealth?: unknown; catalogTokens?: unknown }
@@ -146,7 +149,7 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
 
   const reload = () => {
     setData(null)
-    rpc<ListResult>('list', { sessionId })
+    rpc<ListResult>(MANAGER_API, 'list', { sessionId })
       .then((res) => setData(normalizeList(res)))
       .catch((error: unknown) => {
         setData({ skills: [], index: { skills: {}, trash: {}, usage: {} } })
@@ -158,7 +161,7 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
     if (!open) return
     let cancelled = false
     setData(null)
-    rpc<ListResult>('list', { sessionId })
+    rpc<ListResult>(MANAGER_API, 'list', { sessionId })
       .then((res) => { if (!cancelled) setData(normalizeList(res)) })
       .catch((error: unknown) => {
         if (!cancelled) {
@@ -219,7 +222,7 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
   const doCall = (method: string, arg: unknown, onOk?: () => void) => {
     setBusy(true)
     setNotice('')
-    rpc<{ ok: boolean; error?: string }>(method, arg)
+    rpc<{ ok: boolean; error?: string }>(MANAGER_API, method, arg)
       .then((res) => {
         setBusy(false)
         if (res !== null && typeof res === 'object' && res.ok === true) {
@@ -246,19 +249,19 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
     setView('detail')
     setDetail(null)
     setNotice('')
-    rpc<Detail | null>('get', { name, sessionId })
+    rpc<Detail | null>(MANAGER_API, 'get', { name, sessionId })
       .then((res) => setDetail(res))
       .catch((error: unknown) => { setDetail(null); setNotice(String(error)) })
   }
 
   const submitCreate = () => {
+    // 名称合法性由 host 的 register 统一校验（同一规则只留一处实现）。
     const name = form.name.trim()
-    if (!NAME_RE.test(name)) { setNotice('名称必须是 kebab-case（小写字母、数字、连字符）'); return }
     if (form.description.trim() === '') { setNotice('描述不能为空'); return }
     if (form.content.trim() === '') { setNotice('内容不能为空'); return }
     setBusy(true)
     setNotice('')
-    rpc<{ ok: boolean; error?: string }>('register', {
+    rpc<{ ok: boolean; error?: string }>(MANAGER_API, 'register', {
       sessionId, name, description: form.description.trim(), whenToUse: form.whenToUse.trim(),
       content: form.content, modelInvocable: form.modelInvocable, userInvocable: form.userInvocable,
     }).then((res) => {
@@ -585,23 +588,7 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
 
   // ---------- 汇报（调用本包内聚的 report host /api/report） ----------
 
-  const reportRpc = async <T,>(method: string, args?: unknown): Promise<T> => {
-    const res = await fetch('/api/report', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ method, args }),
-    })
-    let data: any = null
-    try {
-      data = await res.json()
-    } catch {
-      data = null
-    }
-    if (!res.ok || data === null) {
-      throw new Error(!res.ok && data !== null && typeof data.error === 'string' ? data.error : `HTTP ${res.status}`)
-    }
-    return data as T
-  }
+  const reportRpc = <T,>(method: string, args?: unknown): Promise<T> => rpc<T>(REPORT_API, method, args)
 
   const loadReport = (view: ReportView = reportView) => {
     setReportLoading(true)

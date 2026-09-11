@@ -1,6 +1,5 @@
-import { isCrossSiteRequest, readJsonBody, respondJson } from './http.ts'
+import { createRpcRoute } from './http.ts'
 
-const MAX_BODY_BYTES = 1024 * 1024
 
 /**
  * 汇报只做一件事：把 `reporter/brief/` 里的每日简报读出来，按日或按月摊平。
@@ -293,31 +292,14 @@ export function registerReportApi(ctx: EffectContextLike, deps: ReportDependenci
     generateMonthly,
   }
 
-  const routeHandler = async (req: any, res: any): Promise<void> => {
-    try {
-      if (req.method !== 'POST') { respondJson(res, 405, { error: 'method not allowed' }); return }
-      if (isCrossSiteRequest(req)) { respondJson(res, 403, { error: '跨站请求被拒绝' }); return }
-      let body: any
-      try {
-        body = await readJsonBody(req, MAX_BODY_BYTES)
-      } catch (error) {
-        respondJson(res, 400, { error: `请求体无效：${errorMessage(error)}` })
-        return
-      }
-      const method = body?.method
-      if (typeof method !== 'string') { respondJson(res, 400, { error: '缺少 method 字段' }); return }
-      const handler = handlers[method]
-      if (handler === undefined) { respondJson(res, 404, { error: `未知方法：${method}` }); return }
-      const args = body?.args
-      if (typeof args?.sessionId === 'string') {
-        const cwd = cwdOf(args.sessionId)
-        if (cwd !== '') await ensureDirectories(cwd, args.sessionId, config)
-      }
-      respondJson(res, 200, await handler(args))
-    } catch (error) {
-      respondJson(res, 500, { error: errorMessage(error) })
-    }
-  }
+  const routeHandler = createRpcRoute({
+    handlers,
+    before: async (args) => {
+      if (typeof args?.sessionId !== 'string') return
+      const cwd = cwdOf(args.sessionId)
+      if (cwd !== '') await ensureDirectories(cwd, args.sessionId, config)
+    },
+  })
 
   ctx.effect(() => webServer.register({ kind: 'exact', path: '/api/report', handler: routeHandler }))
 }

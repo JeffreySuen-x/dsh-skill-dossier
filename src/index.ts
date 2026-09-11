@@ -15,14 +15,14 @@
  * `skill-manager/trash` 下，重装/删除前校验路径前缀。
  */
 import { realpath } from 'node:fs/promises'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { isAbsolute, join, relative, resolve as resolvePath } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { DIRECTION_LABELS, isDirectionLabel } from './directions.ts'
 import { formatReview, reviewCandidates } from './freshness.ts'
 import { recordUsage, skillGestures } from './usage.ts'
 import { atomicReplaceCommand, fsEntryOf, isWithin, mkdirCommand, moveNoClobberCommand, removeFileCommand, removeRecursiveCommand, trashDirOf } from './files.ts'
-import { isCrossSiteRequest, readJsonBody, respondJson } from './http.ts'
+import { createRpcRoute } from './http.ts'
 import { createIndexStore } from './index-store.ts'
 import { estimateSkillTokens } from './tokens.ts'
 import { normalizeReportConfig, registerReportApi, type ReportAgentsLike, type ReportFsLike, type ReportWebServerLike } from './report.ts'
@@ -57,7 +57,6 @@ export const name = 'skill-manager'
 export const inject = ['skills', 'tools', 'webServer', 'agents', 'fs', 'shell', 'sandboxPolicy']
 
 const NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
-const MAX_BODY_BYTES = 1024 * 1024
 
 interface InvocationLike { modelInvocable: boolean; userInvocable: boolean }
 interface SummaryLike {
@@ -199,23 +198,12 @@ export function apply(ctx: Context, config?: Config): void {
     return agentOf(sessionId)?.session.header.cwd
   }
 
-  function uuid4(): string {
-    let s = ''
-    for (let i = 0; i < 36; i += 1) {
-      if (i === 8 || i === 13 || i === 18 || i === 23) { s += '-'; continue }
-      if (i === 14) { s += '4'; continue }
-      if (i === 19) { s += '89ab'[Math.floor(Math.random() * 4)]; continue }
-      s += '0123456789abcdef'[Math.floor(Math.random() * 16)]
-    }
-    return s
-  }
-
   function userMessage(text: string): unknown {
     return {
       role: 'user',
       content: [{ type: 'text', text }],
       source: { kind: 'user' },
-      id: uuid4(),
+      id: randomUUID(),
     }
   }
 
@@ -299,7 +287,7 @@ export function apply(ctx: Context, config?: Config): void {
     async writeAtomic(cwd, value) {
       const dir = join(cwd, '.dsh', 'skill-manager')
       const targetPath = join(dir, 'index.json')
-      const temporaryPath = join(dir, `.index.json.${process.pid}-${uuid4()}.tmp`)
+      const temporaryPath = join(dir, `.index.json.${process.pid}-${randomUUID()}.tmp`)
       await runShell(mkdirCommand(dir, IS_WINDOWS), join(cwd, '.dsh'))
       const temporaryTarget = await fs.resolve(temporaryPath, { cwd })
       try {
@@ -651,7 +639,7 @@ export function apply(ctx: Context, config?: Config): void {
           current()
           state.registrations.delete(name)
         }
-        const provider = `dsh-skill-dossier:${uuid4()}`
+        const provider = `dsh-skill-dossier:${randomUUID()}`
         let dispose: () => void
         try {
           dispose = scopedSkills.register({
@@ -843,39 +831,7 @@ export function apply(ctx: Context, config?: Config): void {
     },
   }
 
-  const routeHandler = async (req: any, res: any): Promise<void> => {
-    try {
-      if (req.method !== 'POST') {
-        respondJson(res, 405, { error: 'method not allowed' })
-        return
-      }
-      if (isCrossSiteRequest(req)) {
-        respondJson(res, 403, { error: '跨站请求被拒绝' })
-        return
-      }
-      let body: unknown
-      try {
-        body = await readJsonBody(req, MAX_BODY_BYTES)
-      } catch (error) {
-        respondJson(res, 400, { error: `请求体无效：${String(error)}` })
-        return
-      }
-      const { method, args } = (body ?? {}) as { method?: unknown; args?: unknown }
-      if (typeof method !== 'string') {
-        respondJson(res, 400, { error: '缺少 method 字段' })
-        return
-      }
-      const handler = handlers[method]
-      if (handler === undefined) {
-        respondJson(res, 404, { error: `未知方法：${method}` })
-        return
-      }
-      const result = await handler(args)
-      respondJson(res, 200, result)
-    } catch (error) {
-      respondJson(res, 500, { error: String(error) })
-    }
-  }
+  const routeHandler = createRpcRoute({ handlers })
 
   if (webServer !== undefined) {
     ctx.effect(() => webServer.register({ kind: 'exact', path: '/api/skill-manager', handler: routeHandler }))

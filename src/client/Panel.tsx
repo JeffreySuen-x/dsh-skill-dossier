@@ -8,7 +8,7 @@
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from 'react'
-import type { SkillManagerInjected, ThemeScheme } from './index.ts'
+import type { SkillManagerInjected } from './index.ts'
 import { DIRECTION_HINTS, DIRECTION_LABELS } from '../directions.ts'
 import { reviewCandidates } from '../freshness.ts'
 import { dayKey, summarizeUsage } from '../usage.ts'
@@ -138,9 +138,8 @@ function usageLine(summary: { count: number; activeDays: number; lastUsedAt: num
   return `调用记录：${summary.count} 次 · 活跃 ${summary.activeDays} 天 · 最近 ${dayKey(summary.lastUsedAt)}（${when}）`
 }
 
-export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInjected) {
+export function Panel({ sessionId, prependDraft }: SkillManagerInjected) {
   const [open, setOpen] = useState(false)
-  const [scheme, setScheme] = useState<ThemeScheme>(() => themeScheme.get())
   const [data, setData] = useState<ListResult | null>(null)
   const [query, setQuery] = useState('')
   const [tab, setTab] = useState<'skills' | 'archive' | 'report'>('skills')
@@ -181,8 +180,6 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
       })
     return () => { cancelled = true }
   }, [open, sessionId])
-
-  useEffect(() => themeScheme.subscribe(setScheme), [themeScheme])
 
   const profiles = data?.index.skills ?? {}
   const trash = data?.index.trash ?? {}
@@ -750,7 +747,7 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
   const headerTitle = tab === 'archive' ? '技能档案' : tab === 'report' ? '汇报' : view === 'detail' ? '技能详情' : '技能'
 
   return (
-    <div className={css.wrap} data-theme={scheme}>
+    <div className={css.wrap}>
       <button
         type="button"
         className={`${css.toggle}${open ? ` ${css.toggleActive}` : ''}`}

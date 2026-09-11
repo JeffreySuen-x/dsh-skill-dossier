@@ -2,6 +2,9 @@
 
 English · [中文](./README.md)
 
+> Downloaded a hundred skills and still can't find the right one when it matters?
+> Sitting on hundreds of skills but no longer remember what any of them does?
+
 A **skill dossier + work report** plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH). It turns the skills scattered across `~/.dsh/skills`, `.dsh/skills` and `~/.agents/skills` into a dossier you can read, verify and keep fresh — and rolls your daily engineering briefs into daily / monthly / retrospective views.
 
 One package, three panels:

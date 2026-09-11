@@ -2,6 +2,9 @@
 
 [English](./README.en.md) · 中文
 
+> 你是不是下载过很多 skills，但到用的时候却总是缺漏？
+> 你是不是坐拥几百种 skills，却忘了它们究竟是用来做什么的？
+
 给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）用的**技能档案与工作汇报**插件：把散在 `~/.dsh/skills`、`.dsh/skills`、`~/.agents/skills` 里的技能收成一份**可读、可核对、可保鲜**的档案，并把每天的工程简报汇成日报/周报/月报。
 
 一个包，三个板块：

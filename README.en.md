@@ -5,7 +5,7 @@ English · [中文](./README.md)
 > Downloaded a hundred skills and still can't find the right one when it matters?
 > Sitting on hundreds of skills but no longer remember what any of them does?
 
-A **skill dossier + work report** plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH). It turns the skills scattered across `~/.dsh/skills`, `.dsh/skills` and `~/.agents/skills` into a dossier you can read, verify and keep fresh — and rolls your daily engineering briefs into daily / monthly / retrospective views.
+A **skill dossier + work report** plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH). It turns the skills scattered across `~/.dsh/skills`, `.dsh/skills` and `~/.agents/skills` into a dossier you can read, verify and keep fresh — and rolls your daily engineering briefs into daily / weekly / monthly views.
 
 One package, three panels:
 
@@ -13,13 +13,69 @@ One package, three panels:
 |---|---|
 | **Skills** | Browse, search, **filter by direction category** (same axis as the dossier panel), read details, one-click `/name` into the composer; **disable** (reversible trash) · reinstall · **delete** (one step, confirmed) |
 | **Dossier** | Per-skill profile: direction (10 categories), use scope, capability boundaries, scenarios, origin, call stats, **observed load success/failure**, **catalog token cost**, freshness review |
-| **Report** | Three read-only views — **daily** (detail), **weekly** (Mon–Sun) and **monthly** — over `reporter/brief/YYYY-MM-DD.md`. Weekly and monthly are a **contribution graph plus one-line status per project** |
+| **Report** | Three read-only views — **daily** (detail), **weekly** (Mon–Sun) and **monthly** — over `reporter/brief/YYYY-MM-DD.md`. Weekly and monthly are a **contribution graph plus four lines per project** |
 
-> The report half is an **optional module**: `dataRoot` is configurable and defaults to `reporter/brief/` inside the workspace. Ignore it and it is just a panel nobody opens — the skill and dossier halves are unaffected.
->
-> It deliberately has **no retrospective, no export, no run history**: a retrospective is the agent's job (let it read the briefs), export is what copy-paste already does, and run history existed to serve a scheduler that does not exist. The plugin only reads — no writes, no state, one less failure surface.
->
-> **Weekly and monthly say three things only**: a contribution graph (which days you worked and how much), one status sentence per project, and its next steps and blockers. No day-by-day dump — that is what the daily view is for.
+## Report
+
+Reads the daily briefs scattered across your workspace into three views: **daily / weekly / monthly**.
+
+**It only reads** — nothing is written to your files, no state is kept, no scheduler is needed. There is deliberately no retrospective, no export and no run history: a retrospective is the agent's job (let it read the briefs), export is what copy-paste already does, and run history existed to serve a scheduler that does not exist. All three would add state, extra writes and one more failure surface, while the daily view and the range roll-up need only reads.
+
+> The report half is an **optional module**: `dataRoot` / `briefDir` are configurable and default to `reporter/brief/` inside the workspace. Ignore it and it is just a panel nobody opens — the skill and dossier halves are unaffected.
+
+### Where the data comes from
+
+`<dataRoot>/<briefDir>/YYYY-MM-DD.md`, written by the `brief` skill. One `## Project name` block per project, and **the field names are the parsing contract** — these five cannot be renamed:
+
+```md
+---
+date: 2026-09-11
+---
+
+## Project name
+
+- 作用：one sentence on what it is
+- 实现：its technical shape
+- 今日进度：
+  - one status line (overwritten, not appended)
+- 待办：
+  - at most 3
+- 问题：
+  - real blockers only
+```
+
+The date comes from the `date:` frontmatter, falling back to the filename.
+
+### The three views
+
+| View | Range | What you get |
+|---|---|---|
+| **Daily** | Today; falls back to the **latest day that has a brief** | Full detail per project: purpose / implementation / every progress item of that day / next steps / blockers, plus a stats line (N projects · N progress items · N todos · N issues) |
+| **Weekly** | Monday–Sunday; falls back to the **latest week with data** | **Contribution graph + four lines per project** |
+| **Monthly** | The 1st of the month through today | The same, on a whole-month axis instead of squeezed into one week |
+
+**Fallbacks are labelled**: when one is used, the view says which day or week the data actually came from instead of pretending today has records.
+
+### Reading the contribution graph
+
+**One cell per day, darker means more was done that day.**
+
+- Depth is the **total number of progress items across all projects** that day, in four steps: `≤9` / `≤29` / `≤59` / `>59`
+- The colour is DSH's native blue token (`--dsw-alias-state-business-primary`) mixed into the background with `color-mix`
+- Hovering shows which projects that day touched
+- **Future days are not drawn** — that is "not yet", not "no record"
+- A calendar day with no brief still occupies a cell, but it is empty: **empty means nothing was written, not that the read failed**
+
+### Why the range views have only four lines
+
+```
+作用：what this project is
+进度：the one status sentence written last
+待办：the next steps recorded last
+难点：the blockers recorded last
+```
+
+Taking "the last day" rather than "everything in the range" is deliberate: a brief's `今日进度` is itself an **overwritten status**, so the range views answer "where is each project **now**", not "what did you do this week" — the latter is what the daily view is for.
 
 ## Why a "dossier"
 

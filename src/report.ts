@@ -216,8 +216,9 @@ export function registerReportApi(ctx: EffectContextLike, deps: ReportDependenci
   }
 
   async function readRange(cwd: string, dates: string[]) {
-    // 每天带项目名 + 当天的进展条数：面板据此画 GitHub 式的深浅格。
-    const days: Array<{ date: string; projects: Array<{ name: string; count: number }> }> = []
+    // 一天一格：count = 那天所有项目的进展条数合计（颜色深浅），
+    // projects = 当天涉及的项目名（只用于悬停提示，不参与画格子）。
+    const days: Array<{ date: string; count: number; projects: string[] }> = []
     const projects = new Map<string, RangeProject>()
     const missing: string[] = []
     for (const date of dates) {
@@ -232,7 +233,8 @@ export function registerReportApi(ctx: EffectContextLike, deps: ReportDependenci
       }
       days.push({
         date,
-        projects: result.projects.map((project) => ({ name: project.name, count: project.progress.length })),
+        count: result.projects.reduce((sum, project) => sum + project.progress.length, 0),
+        projects: result.projects.map((project) => project.name),
       })
       for (const project of result.projects) {
         const aggregate = projects.get(project.name)

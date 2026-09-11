@@ -519,70 +519,93 @@
   word-break: break-all;
 }
 
-/* 周报/月报的甘特图：一行一项目、一列一天，亮格＝那天有记录。 */
-.ganttScroll {
-  overflow-x: auto;
-  padding-bottom: 4px;
-}
-
-.gantt {
-  min-width: max-content;
-}
-
-.ganttRow {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  line-height: 1.4;
-}
-
-.ganttLabel {
-  flex: 0 0 132px;
-  max-width: 132px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--sm-text-2);
-  font-size: 12px;
-  padding-right: 6px;
-}
-
-.ganttTick {
-  flex: 0 0 14px;
-  text-align: center;
-  font-size: 10px;
-  color: var(--sm-text-2);
-}
-
-.ganttCell {
-  flex: 0 0 14px;
-  height: 12px;
+/* 周报/月报的贡献图：一格一天，颜色四级＝那天做了多少（GitHub 贡献图读法）。 */
+.heatCell {
+  width: 13px;
+  height: 13px;
   border-radius: 2px;
   background: var(--sm-bg-2);
   border: 1px solid var(--sm-border);
+  display: inline-block;
 }
 
-.ganttL1 {
+.heatL1 {
   background: var(--sm-heat-1);
   border-color: var(--sm-heat-1);
 }
 
-.ganttL2 {
+.heatL2 {
   background: var(--sm-heat-2);
   border-color: var(--sm-heat-2);
 }
 
-.ganttL3 {
+.heatL3 {
   background: var(--sm-heat-3);
   border-color: var(--sm-heat-3);
 }
 
-.ganttL4 {
+.heatL4 {
   background: var(--sm-heat-4);
   border-color: var(--sm-heat-4);
 }
 
-.ganttLegend {
+/* 月报：列＝周，行＝周一~周日（GitHub 日历的排法）。 */
+.heatGrid {
+  display: flex;
+  gap: 3px;
+  padding: 2px 0;
+}
+
+.heatWeekdays {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-right: 2px;
+  font-size: 10px;
+  line-height: 13px;
+  color: var(--sm-text-2);
+}
+
+.heatWeekdays span {
+  height: 13px;
+}
+
+.heatWeek {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.heatBlank {
+  width: 13px;
+  height: 13px;
+}
+
+/* 周报：一行 7 格，格下是星期与日号。 */
+.weekStrip {
+  display: flex;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.weekDay {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+}
+
+.weekDayLabel {
+  font-size: 10px;
+  color: var(--sm-text-2);
+}
+
+.weekDayNum {
+  font-size: 10px;
+  color: var(--sm-text-2);
+}
+
+.heatLegend {
   display: flex;
   align-items: center;
   gap: 3px;

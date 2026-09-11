@@ -753,8 +753,8 @@ describe('single-package host activation', () => {
     expect(project.todo).toEqual(['补安装冒烟'])
     expect(project.issues).toEqual(['定时未验证'])
     expect(project.days).toEqual([date])
-    // 甘特图靠这个 count 决定格子深浅（GitHub 贡献图的读法）。
-    expect(weekly.body.days).toEqual([{ date, projects: [{ name: '管理插件', count: 1 }] }])
+    // 一天一格：count 决定格子深浅（GitHub 贡献图读法），projects 只用于悬停提示。
+    expect(weekly.body.days).toEqual([{ date, count: 1, projects: ['管理插件'] }])
 
     const monthly = await post(route, { method: 'generateMonthly', args: { sessionId: 'session-1' } })
     expect(monthly.body.scope).toBe('monthly')

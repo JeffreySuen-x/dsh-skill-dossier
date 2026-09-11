@@ -743,18 +743,24 @@ describe('single-package host activation', () => {
 
     const weekly = await post(route, { method: 'generateWeekly', args: { sessionId: 'session-1' } })
     expect(weekly.body.scope).toBe('weekly')
-    expect(weekly.body.dates).toHaveLength(7)
     expect(weekly.body.dates).toContain(date)
+    // 区间里没有简报的那些天是「空白」，不是「失败」——只有真的读不了才算失败。
+    expect(weekly.body.lastError).toBe('')
+    // 未来的日期不该出现在甘特图里（今天之后没有数据可言）。
+    expect(weekly.body.dates.every((day: string) => day <= date)).toBe(true)
     const project = weekly.body.projects.find((item: any) => item.name === '管理插件')
     expect(project.progress).toBe('最新一句现状')
     expect(project.todo).toEqual(['补安装冒烟'])
     expect(project.issues).toEqual(['定时未验证'])
     expect(project.days).toEqual([date])
+    // 甘特图靠这个 count 决定格子深浅（GitHub 贡献图的读法）。
+    expect(weekly.body.days).toEqual([{ date, projects: [{ name: '管理插件', count: 1 }] }])
 
     const monthly = await post(route, { method: 'generateMonthly', args: { sessionId: 'session-1' } })
     expect(monthly.body.scope).toBe('monthly')
-    expect(monthly.body.dates.length).toBeGreaterThanOrEqual(28)
     expect(monthly.body.dates).toContain(date)
+    expect(monthly.body.lastError).toBe('')
+    expect(monthly.body.dates.at(-1)).toBe(date)
     expect(monthly.body.label).toBe(date.slice(0, 7))
   })
 

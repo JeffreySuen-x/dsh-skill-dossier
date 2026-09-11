@@ -166,6 +166,10 @@ function statsOf(projects: ReportProject[]) {
   }
 }
 
+function isMissingFile(error: unknown): boolean {
+  return error !== null && typeof error === 'object' && 'code' in error && (error as { code?: unknown }).code === 'ENOENT'
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -212,18 +216,24 @@ export function registerReportApi(ctx: EffectContextLike, deps: ReportDependenci
   }
 
   async function readRange(cwd: string, dates: string[]) {
-    const days: Array<{ date: string; projects: string[] }> = []
+    // 每天带项目名 + 当天的进展条数：面板据此画 GitHub 式的深浅格。
+    const days: Array<{ date: string; projects: Array<{ name: string; count: number }> }> = []
     const projects = new Map<string, RangeProject>()
     const missing: string[] = []
     for (const date of dates) {
       let result: Awaited<ReturnType<typeof readBrief>>
       try {
         result = await readBrief(cwd, date)
-      } catch {
-        missing.push(date)
+      } catch (error) {
+        // 区间里的日历日是「格子」，不是「必须有文件」：那天没写简报就是空白。
+        // 只有真的读不了（权限、坏文件、IO）才算失败。
+        if (!isMissingFile(error)) missing.push(date)
         continue
       }
-      days.push({ date, projects: result.projects.map((project) => project.name) })
+      days.push({
+        date,
+        projects: result.projects.map((project) => ({ name: project.name, count: project.progress.length })),
+      })
       for (const project of result.projects) {
         const aggregate = projects.get(project.name)
           ?? { name: project.name, purpose: '', progress: '', todo: [], issues: [], days: [] }
@@ -285,17 +295,19 @@ export function registerReportApi(ctx: EffectContextLike, deps: ReportDependenci
     let end = ''
     if (scope === 'weekly') {
       const pick = pickWeek(allDates, today)
-      dates = pick.dates
-      start = pick.start
-      end = pick.end
+      // 未来的日子不画：那不是「没记录」，是「还没到」。
+      dates = pick.dates.filter((day) => day <= today)
+      start = dates[0] ?? pick.start
+      end = dates.at(-1) ?? pick.end
       fallbackFrom = pick.fallbackFrom
-      label = `${pick.start} ~ ${pick.end}`
+      label = `${start} ~ ${end}`
     } else {
       const pick = pickMonth(allDates, today.slice(0, 7))
-      start = `${pick.month}-01`
-      end = `${pick.month}-${String(new Date(Number(pick.month.slice(0, 4)), Number(pick.month.slice(5, 7)), 0).getDate()).padStart(2, '0')}`
-      const day = Number(end.slice(8))
-      dates = Array.from({ length: day }, (_, index) => `${pick.month}-${String(index + 1).padStart(2, '0')}`)
+      const lastDay = new Date(Number(pick.month.slice(0, 4)), Number(pick.month.slice(5, 7)), 0).getDate()
+      dates = Array.from({ length: lastDay }, (_, index) => `${pick.month}-${String(index + 1).padStart(2, '0')}`)
+        .filter((day) => day <= today)
+      start = dates[0] ?? `${pick.month}-01`
+      end = dates.at(-1) ?? start
       fallbackFrom = pick.fallbackMonth
       label = pick.month
     }

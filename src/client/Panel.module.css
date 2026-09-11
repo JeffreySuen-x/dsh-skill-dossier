@@ -12,6 +12,10 @@
   --sm-border-2: #8a8a8a;
   --sm-fill: #000000;
   --sm-fill-text: #ffffff;
+  --sm-heat-1: #c9c9c9;
+  --sm-heat-2: #8f8f8f;
+  --sm-heat-3: #4a4a4a;
+  --sm-heat-4: #000000;
   --sm-shadow: 0 0 1px 0 rgba(0, 0, 0, 0.2), 0 12px 32px 0 rgba(0, 0, 0, 0.18);
 }
 .wrap[data-theme='dark'] {
@@ -24,6 +28,10 @@
   --sm-border-2: #6b6b6b;
   --sm-fill: #ffffff;
   --sm-fill-text: #000000;
+  --sm-heat-1: #3a3a3a;
+  --sm-heat-2: #6e6e6e;
+  --sm-heat-3: #a8a8a8;
+  --sm-heat-4: #ffffff;
   --sm-shadow: 0 0 1px 0 rgba(255, 255, 255, 0.25), 0 12px 32px 0 rgba(0, 0, 0, 0.8);
 }
 
@@ -554,7 +562,31 @@
   border: 1px solid var(--sm-border);
 }
 
-.ganttOn {
-  background: var(--sm-fill);
-  border-color: var(--sm-fill);
+.ganttL1 {
+  background: var(--sm-heat-1);
+  border-color: var(--sm-heat-1);
+}
+
+.ganttL2 {
+  background: var(--sm-heat-2);
+  border-color: var(--sm-heat-2);
+}
+
+.ganttL3 {
+  background: var(--sm-heat-3);
+  border-color: var(--sm-heat-3);
+}
+
+.ganttL4 {
+  background: var(--sm-heat-4);
+  border-color: var(--sm-heat-4);
+}
+
+.ganttLegend {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-top: 6px;
+  font-size: 10px;
+  color: var(--sm-text-2);
 }

@@ -82,7 +82,7 @@ interface ReportRange {
   start: string
   end: string
   dates: string[]
-  days: Array<{ date: string; projects: string[] }>
+  days: Array<{ date: string; projects: Array<{ name: string; count: number }> }>
   projects: RangeProject[]
   source?: string
   lastError?: string
@@ -568,13 +568,9 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
     const method = view === 'daily' ? 'generateDaily' : view === 'weekly' ? 'generateWeekly' : 'generateMonthly'
     reportRpc<ReportData>(method, { sessionId })
       .then((data) => {
-        const failure = reportFailureMessage(data)
-        if (failure !== '') {
-          setReportError(failure)
-          setReportData(null)
-        } else {
-          setReportData(data)
-        }
+        // 个别简报读不出来时保留其余数据 + 顶部告警，不要把整页清空。
+        setReportError(reportFailureMessage(data))
+        setReportData(data)
         setReportLoading(false)
       })
       .catch((error: unknown) => { setReportError(String(error)); setReportLoading(false) })
@@ -586,30 +582,55 @@ export function Panel({ sessionId, prependDraft, themeScheme }: SkillManagerInje
     return list.length <= 3 ? list.join('；') : `${list.slice(0, 3).join('；')}（+${list.length - 3}）`
   }
 
-  /** 甘特图：一行一个项目，一列一天；有记录的那天点亮。 */
+  /** 一格一天，颜色深浅＝那天这个项目有几条进展（GitHub 贡献图的读法）。 */
+  const ganttLevel = (count: number | undefined): string => {
+    if (count === undefined || count <= 0) return ''
+    if (count === 1) return ` ${css.ganttL1}`
+    if (count === 2) return ` ${css.ganttL2}`
+    if (count <= 4) return ` ${css.ganttL3}`
+    return ` ${css.ganttL4}`
+  }
+
   const reportGantt = (range: ReportRange) => {
-    const byDate = new Map(range.days.map((day) => [day.date, new Set(day.projects)]))
+    const byDate = new Map(range.days.map((day) => [day.date, new Map(day.projects.map((item) => [item.name, item.count]))]))
+    const columnLabel = (date: string, index: number): string => {
+      // 只在每 5 格和第一格标日期，避免 30 个数字挤成一团。
+      if (index === 0 || Number(date.slice(8)) % 5 === 0) return String(Number(date.slice(8)))
+      return ''
+    }
     return (
       <div className={css.ganttScroll}>
         <div className={css.gantt}>
           <div className={css.ganttRow}>
             <span className={css.ganttLabel} />
-            {range.dates.map((date) => (
-              <span key={date} className={css.ganttTick} title={date}>{Number(date.slice(8))}</span>
+            {range.dates.map((date, index) => (
+              <span key={date} className={css.ganttTick} title={date}>{columnLabel(date, index)}</span>
             ))}
           </div>
           {range.projects.map((project) => (
             <div key={project.name} className={css.ganttRow}>
               <span className={css.ganttLabel} title={project.name}>{project.name}</span>
-              {range.dates.map((date) => (
-                <span
-                  key={date}
-                  className={`${css.ganttCell}${byDate.get(date)?.has(project.name) === true ? ` ${css.ganttOn}` : ''}`}
-                  title={`${project.name} · ${date}${byDate.get(date)?.has(project.name) === true ? '（有记录）' : ''}`}
-                />
-              ))}
+              {range.dates.map((date) => {
+                const count = byDate.get(date)?.get(project.name)
+                return (
+                  <span
+                    key={date}
+                    className={`${css.ganttCell}${ganttLevel(count)}`}
+                    title={`${project.name} · ${date}${count === undefined ? '（无记录）' : `（${count} 条进展）`}`}
+                  />
+                )
+              })}
             </div>
           ))}
+        </div>
+        <div className={css.ganttLegend}>
+          <span>少</span>
+          <span className={css.ganttCell} />
+          <span className={`${css.ganttCell} ${css.ganttL1}`} />
+          <span className={`${css.ganttCell} ${css.ganttL2}`} />
+          <span className={`${css.ganttCell} ${css.ganttL3}`} />
+          <span className={`${css.ganttCell} ${css.ganttL4}`} />
+          <span>多</span>
         </div>
       </div>
     )

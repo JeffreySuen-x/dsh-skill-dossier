@@ -12,12 +12,12 @@
   --sm-border-2: #8a8a8a;
   --sm-fill: #000000;
   --sm-fill-text: #ffffff;
-  /* GitHub 贡献图浅色配色 */
-  --sm-heat-0: #ebedf0;
-  --sm-heat-1: #9be9a8;
-  --sm-heat-2: #40c463;
-  --sm-heat-3: #30a14e;
-  --sm-heat-4: #216e39;
+  /* 贡献图：以 DeepSeek 品牌蓝 #4d6bfe 为锚的四级色阶（浅色） */
+  --sm-heat-0: #eef0f3;
+  --sm-heat-1: #dbe1fe;
+  --sm-heat-2: #afbcfe;
+  --sm-heat-3: #7990fe;
+  --sm-heat-4: #4d6bfe;
   --sm-shadow: 0 0 1px 0 rgba(0, 0, 0, 0.2), 0 12px 32px 0 rgba(0, 0, 0, 0.18);
 }
 .wrap[data-theme='dark'] {
@@ -30,12 +30,12 @@
   --sm-border-2: #6b6b6b;
   --sm-fill: #ffffff;
   --sm-fill-text: #000000;
-  /* GitHub 贡献图深色配色 */
-  --sm-heat-0: #161b22;
-  --sm-heat-1: #0e4429;
-  --sm-heat-2: #006d32;
-  --sm-heat-3: #26a641;
-  --sm-heat-4: #39d353;
+  /* 贡献图：以 DeepSeek 品牌蓝 #4d6bfe 为锚的四级色阶（深色） */
+  --sm-heat-0: #1b1d22;
+  --sm-heat-1: #17204c;
+  --sm-heat-2: #2a3b8c;
+  --sm-heat-3: #3e56cb;
+  --sm-heat-4: #4d6bfe;
   --sm-shadow: 0 0 1px 0 rgba(255, 255, 255, 0.25), 0 12px 32px 0 rgba(0, 0, 0, 0.8);
 }
 

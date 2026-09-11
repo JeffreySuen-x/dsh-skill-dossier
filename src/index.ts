@@ -78,7 +78,11 @@ interface SkillsLike {
 interface AgentLike {
   session: { header: { cwd: string } }
 }
-interface AgentsLike { get(id: string): AgentLike | undefined }
+interface AgentsLike {
+  get(id: string): AgentLike | undefined
+  /** 在线 agent 列表（DSH 的 AgentsService 有这个；缺失时退化为只按需建） */
+  list?(): AgentLike[]
+}
 interface FsLike {
   resolve(path: string, opts?: { cwd?: string }): Promise<unknown>
   readText(target: unknown): Promise<string>
@@ -242,6 +246,26 @@ export function apply(ctx: Context, config?: Config): void {
 
   const readIndex = (cwd: string | undefined) => indexStore.read(cwd)
 
+  /**
+   * 插件本身不携带任何信息与记录：工作区里的记录落点由插件启动时建好。
+   * 只建目录、不预写文件——空索引文件由第一次真正写入时产生（少一次无谓的重写）。
+   * 幂等；失败只记不抛，不拦插件加载。
+   */
+  function provisionWorkspace(agent: AgentLike): void {
+    const { cwd } = agent.session.header
+    if (typeof cwd !== 'string' || cwd === '') return
+    void (async () => {
+      try {
+        const policy = sandboxPolicy!.resolve({ session: agent.session })
+        for (const dir of [join(cwd, '.dsh', 'skill-manager'), join(cwd, 'reporter', 'brief')]) {
+          await runShell(mkdirCommand(dir, IS_WINDOWS), dir, policy)
+        }
+      } catch (error) {
+        logger?.warn?.(`skill-manager: 记录目录初始化失败（不影响使用，下次再试）：${errorMessage(error)}`)
+      }
+    })()
+  }
+
   class IndexOperationRejected extends Error {
     constructor(readonly response: { ok: false; error: string }) {
       super(response.error)
@@ -309,6 +333,7 @@ export function apply(ctx: Context, config?: Config): void {
     type HostEventOn = {
       (name: 'tools/result', listener: (exec: any, result: any) => void): () => void
       (name: 'agent/inbox/claimed', listener: (payload: any) => void): () => void
+      (name: 'agent/created', listener: (payload: any) => void): () => void
     }
     const onEvent = ctx.on as unknown as HostEventOn
     // ① 模型经 skill 工具加载（tools/result 为 emit，未作用域监听器收到所有 agent 的事件）。
@@ -321,6 +346,11 @@ export function apply(ctx: Context, config?: Config): void {
       if (typeof cwd !== 'string') return
       if (result?.isError !== true) { recordSkillUse(cwd, name); return }
       recordSkillUse(cwd, name, failureText(result))
+    })
+    // ③ 新会话出现即补建它的记录目录（插件启动时还不存在这些会话）。
+    onEvent('agent/created', (payload) => {
+      const agent = payload?.agent as AgentLike | undefined
+      if (agent !== undefined) provisionWorkspace(agent)
     })
     // ② 用户 /name 手势（模型工具之外的另一条调用路径）。
     onEvent('agent/inbox/claimed', (payload) => {
@@ -693,6 +723,10 @@ export function apply(ctx: Context, config?: Config): void {
   }
 
   const routeHandler = createRpcRoute({ handlers })
+
+  // 启动即建：插件加载时还没有工作区概念，所以先给所有已在线的会话补一遍，
+  // 之后每个新会话由 agent/created 立刻补建。
+  for (const agent of agents.list?.() ?? []) provisionWorkspace(agent)
 
   if (webServer !== undefined) {
     ctx.effect(() => webServer.register({ kind: 'exact', path: '/api/skill-manager', handler: routeHandler }))

@@ -157,7 +157,7 @@ function hostContext(options: {
     scopeIds.set(agent, id)
     sessionAgents.set(id, agent)
   }
-  services.set('agents', { get: (id: string) => sessionAgents.get(id) })
+  services.set('agents', { get: (id: string) => sessionAgents.get(id), list: () => [...sessionAgents.values()] })
   services.set('fs', {
     resolve: async (path: string, options?: { cwd?: string }) => isAbsolute(path)
       ? path
@@ -324,6 +324,19 @@ describe('single-package host activation', () => {
 
     expect([...routes.keys()].sort()).toEqual(['/api/report', '/api/skill-manager'])
     expect(inject).toEqual(expect.arrayContaining(['fs', 'shell', 'sandboxPolicy']))
+  })
+
+  it('provisions the workspace record directories when the plugin starts', async () => {
+    const host = hostContext()
+    apply(host.ctx as never)
+
+    // 插件不自带任何数据：启动时就把两个记录目录建出来。
+    await waitFor(() => host.shellCommands.some((command) => command.includes('reporter/brief')))
+    const made = host.shellCommands.filter((command) => command.startsWith('mkdir -p ')).map((c) => c.replaceAll('\\', '/'))
+    expect(made.some((command) => command.includes('/.dsh/skill-manager'))).toBe(true)
+    expect(made.some((command) => command.includes('/reporter/brief'))).toBe(true)
+    // 只建目录，不预写文件。
+    expect(host.writeCalls).toEqual([])
   })
 
   it('serves brief data and rejects cross-site report requests', async () => {

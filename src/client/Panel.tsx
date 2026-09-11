@@ -10,7 +10,6 @@ import type { ReactNode } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from 'react'
 import type { SkillManagerInjected } from './index.ts'
 import { DIRECTION_HINTS, DIRECTION_LABELS } from '../directions.ts'
-import { reviewCandidates } from '../freshness.ts'
 import { dayKey, summarizeUsage } from '../usage.ts'
 import type { IndexEntry, TrashRecord } from '../index-store.ts'
 import type { UsageRecord } from '../usage.ts'
@@ -420,7 +419,6 @@ export function Panel({ sessionId, prependDraft }: SkillManagerInjected) {
     const unprofiled = skills === null ? [] : skills.filter((s) => !hasProfile(s.name) && matches([s.name, s.description]))
     const trashedNames = Object.keys(trash)
     const usageByName = new Map(summarizeUsage(usage, Date.now()).map((entry) => [entry.name, entry]))
-    const needsReview = reviewCandidates(profiles, usage, Date.now(), 5)
     const directionSet = new Set<string>(DIRECTION_LABELS)
     for (const n of profiledNames) {
       const d = profiles[n]?.direction
@@ -516,25 +514,6 @@ export function Panel({ sessionId, prependDraft }: SkillManagerInjected) {
         <div className={css.hint}>
           目录成本合计 ≈{catalogTokens} tokens：{profiledNames.length} 条档案对应的技能目录会整段进系统提示，越靠前的技能越占预算。
         </div>
-        {needsReview.length > 0 ? (
-          <div className={css.section}>
-            <div className={css.sectionTitle}>待复审（{needsReview.length}）</div>
-            <div className={css.hint}>
-              按「易变方向 + 长期未用 + 久未复审」排序，点进去看档案再决定更新还是删。
-            </div>
-            {needsReview.map((entry) => (
-              <div key={entry.name} className={css.row}>
-                <div className={css.rowMain}>
-                  <div className={css.rowName}>
-                    {entry.name}
-                    <span className={css.badge}>{entry.direction}</span>
-                  </div>
-                  <div className={css.rowDesc}>{entry.reasons.join('、')}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : null}
         {(filter === ALL_FILTER || filter === UNPROFILED_FILTER) && unprofiled.length > 0 ? (
           <div className={css.section}>
             <div className={css.sectionTitle}>新加入/未建档（{unprofiled.length}）</div>

@@ -57,6 +57,7 @@
   width: min(620px, 90vw);
   max-height: min(560px, 75vh);
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 4px;
   border: 0;
   border-radius: 20px;

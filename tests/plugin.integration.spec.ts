@@ -31,10 +31,12 @@ function currentDateKey(): string {
 function hostContext(options: {
   cwd?: string
   listDir?: () => Promise<Array<{ name?: string; path?: string }>>
-  writeText?: (target: unknown, content: string) => Promise<void>
+  writeText?: (target: unknown, content: string, encoding?: unknown, opts?: unknown, policy?: unknown) => Promise<void>
   followup?: (message: unknown) => void
   indexText?: string
   indexReadError?: Error
+  /** 可变的「路径后缀 → 内容」表：测试用它模拟 agent 写产物与 brief 回写目标。 */
+  files?: Map<string, string>
   shellRun?: (request: any) => Promise<{ exitCode: number; stderr?: { text?: string } }>
   skill?: FakeSkill
   listSkills?: (
@@ -47,6 +49,10 @@ function hostContext(options: {
   const services = new Map<string, unknown>()
   const today = currentDateKey()
   const shellCommands: string[] = []
+  /** 每次 fs.writeText 的目标与策略，供「写路径是否带上工作区策略」这类断言使用。 */
+  const writeCalls: Array<{ target: string; policy: unknown }> = []
+  /** ctx.on 注册的监听器；host 事件（tools/result、agent/inbox/claimed）由此驱动。 */
+  const listeners = new Map<string, Array<(...args: any[]) => unknown>>()
   const cwd = options.cwd ?? (process.platform === 'win32' ? 'C:\\workspace' : '/workspace')
   const globalRuntime = new Map<string, FakeSkill>()
   const sessionRuntime = new Map<string, Map<string, FakeSkill>>()
@@ -158,14 +164,21 @@ function hostContext(options: {
       : join(options?.cwd ?? '', path),
     listDir: options.listDir ?? (async () => [{ name: `${today}.md` }]),
     readText: async (target: unknown) => {
-      if (String(target).replaceAll('\\', '/').endsWith('/.dsh/skill-manager/index.json')) {
+      const normalized = String(target).replaceAll('\\', '/')
+      if (normalized.endsWith('/.dsh/skill-manager/index.json')) {
         if (options.indexReadError !== undefined) throw options.indexReadError
         if (options.indexText === undefined) throw Object.assign(new Error('missing'), { code: 'ENOENT' })
         return options.indexText
       }
+      for (const [suffix, content] of options.files ?? []) {
+        if (normalized.endsWith(suffix)) return content
+      }
       return `---\ndate: ${today}\n---\n\n# Brief\n\n## 管理插件\n- 作用：管理技能\n- 实现：host + client\n- 今日进度：\n  1. 单包汇报\n- 待办：\n- 问题：\n`
     },
-    writeText: options.writeText ?? (async () => undefined),
+    writeText: async (target: unknown, content: string, encoding?: unknown, opts?: unknown, policy?: unknown) => {
+      writeCalls.push({ target: String(target), policy })
+      await options.writeText?.(target, content, encoding, opts, policy)
+    },
   })
   services.set('shell', {
     resolve: (request: unknown) => request,
@@ -178,6 +191,15 @@ function hostContext(options: {
 
   const ctx = {
     get(name: string) { return services.get(name) },
+    on(name: string, listener: (...args: any[]) => unknown) {
+      const registered = listeners.get(name) ?? []
+      registered.push(listener)
+      listeners.set(name, registered)
+      return () => {
+        const index = registered.indexOf(listener)
+        if (index >= 0) registered.splice(index, 1)
+      }
+    },
     effect(setup: () => unknown) {
       const dispose = setup()
       if (typeof dispose === 'function') pluginDisposers.add(dispose as () => void)
@@ -186,8 +208,14 @@ function hostContext(options: {
   }
   return {
     ctx,
+    cwd,
     routes,
     shellCommands,
+    writeCalls,
+    /** 触发一次 host 事件（tools/result、agent/inbox/claimed），驱动插件埋点。 */
+    emit(name: string, ...args: any[]) {
+      for (const listener of [...(listeners.get(name) ?? [])]) listener(...args)
+    },
     disposeSession(id: string) {
       sessionActive.set(id, false)
       for (const dispose of [...(sessionDisposers.get(id) ?? [])].reverse()) dispose()
@@ -244,6 +272,39 @@ function isLifecycleMove(command: string): boolean {
   return process.platform === 'win32'
     ? command.includes('[DshSkillManagerNativeMove]::MoveFileEx(')
     : command.includes('mv -n -- ')
+}
+
+/**
+ * 行为替身：复刻 `dsh-fs-sandbox` 的 `checkedTarget` 判定——mode 必须是
+ * workspace-write，且目标落在 `policy.workspaceRoot` 之下。缺省策略走的是部署
+ * 回退根（dsh 进程 cwd），跨工作区打开的会话不在其下，写入会被
+ * `FS_SANDBOX_DENIED` 拒绝；这正是索引写路径曾经全量静默失效的原因。
+ */
+async function rejectingSandboxWrite(
+  target: unknown,
+  _content: string,
+  _encoding?: unknown,
+  _opts?: unknown,
+  policy?: unknown,
+): Promise<void> {
+  const value = policy as { mode?: string; workspaceRoot?: string } | undefined
+  const normalized = String(target).replaceAll('\\', '/')
+  const rooted = value?.mode === 'workspace-write'
+    && typeof value.workspaceRoot === 'string'
+    && normalized.startsWith(String(value.workspaceRoot).replaceAll('\\', '/'))
+  if (!rooted) {
+    throw new Error(`FsError: cannot write "${String(target)}": file access denied under workspace-write mode`)
+  }
+}
+
+/** 轮询等待异步副作用（埋点是 fire-and-forget，测试必须等它落定）。 */
+async function waitFor(condition: () => boolean | Promise<boolean>, timeoutMs = 1000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (await condition()) return
+    if (Date.now() > deadline) throw new Error('waitFor timed out')
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
 }
 
 describe('single-package host activation', () => {
@@ -614,6 +675,80 @@ describe('single-package host activation', () => {
     expect(shellCommands.some(isTemporaryFileCleanup)).toBe(true)
   })
 
+  it('writes the index under a workspace-rooted policy the fs sandbox accepts', async () => {
+    const { ctx, routes, writeCalls } = hostContext({ cwd: '/workspace', writeText: rejectingSandboxWrite })
+    apply(ctx as never)
+
+    const response = await post(routes.get('/api/skill-manager')!, {
+      method: 'setOrigin',
+      args: { sessionId: 'session-1', name: 'alpha', origin: 'self' },
+    })
+
+    expect(response).toEqual({ status: 200, body: { ok: true } })
+    expect(writeCalls).toHaveLength(1)
+    expect(writeCalls[0]?.policy).toEqual({ mode: 'workspace-write', workspaceRoot: '/workspace' })
+  })
+
+  it('records a skill load reported by tools/result into usage', async () => {
+    const written: string[] = []
+    const host = hostContext({
+      writeText: async (_target: unknown, content: string) => { written.push(String(content)) },
+    })
+    apply(host.ctx as never)
+
+    host.emit(
+      'tools/result',
+      { name: 'skill', arguments: { name: 'ponytail' }, agent: { session: { header: { cwd: host.cwd } } } },
+      { isError: false },
+    )
+    await waitFor(() => written.length > 0)
+
+    expect(JSON.parse(written[0]!).usage.ponytail.count).toBe(1)
+  })
+
+  it('records a failed skill load as an observed outcome, not just a skipped call', async () => {
+    const written: string[] = []
+    const host = hostContext({
+      indexText: JSON.stringify({
+        version: 1,
+        skills: { ponytail: { name: 'ponytail', direction: '工程代码' } },
+        trash: {},
+        usage: {},
+      }),
+      writeText: async (_target: unknown, content: string) => { written.push(String(content)) },
+    })
+    apply(host.ctx as never)
+
+    host.emit(
+      'tools/result',
+      { name: 'skill', arguments: { name: 'ponytail' }, agent: { session: { header: { cwd: host.cwd } } } },
+      { isError: true, error: 'skill not found' },
+    )
+    await waitFor(() => written.length > 0)
+
+    const index = JSON.parse(written[0]!)
+    expect(index.usage.ponytail.count).toBe(1)
+    expect(index.skills.ponytail.outcomes).toMatchObject({ loaded: 0, failed: 1, lastError: 'skill not found' })
+  })
+
+  it('surfaces a usage write failure instead of swallowing it', async () => {    const host = hostContext({ writeText: async () => { throw new Error('FsError: file access denied') } })
+    apply(host.ctx as never)
+
+    host.emit(
+      'tools/result',
+      { name: 'skill', arguments: { name: 'ponytail' }, agent: { session: { header: { cwd: host.cwd } } } },
+      { isError: false },
+    )
+    const route = host.routes.get('/api/skill-manager')!
+    let health: unknown = null
+    await waitFor(async () => {
+      health = (await post(route, { method: 'list', args: { sessionId: 'session-1' } })).body.usageHealth
+      return health !== null
+    })
+
+    expect(String(health)).toContain('file access denied')
+  })
+
   it('does not create or rewrite the index for a rejected lifecycle operation', async () => {
     const writes: string[] = []
     const { ctx, routes } = hostContext({
@@ -631,7 +766,7 @@ describe('single-package host activation', () => {
   })
 
   it('moves an uninstalled skill back when the index commit fails', async () => {
-    const base = mkdtempSync(join(tmpdir(), 'dsh-skill-manager-uninstall-'))
+    const base = mkdtempSync(join(tmpdir(), 'dsh-skill-dossier-uninstall-'))
     const skillDir = join(base, 'skills', 'alpha')
     const skillPath = join(skillDir, 'SKILL.md')
     mkdirSync(skillDir, { recursive: true })
@@ -670,7 +805,7 @@ describe('single-package host activation', () => {
   })
 
   it('moves a reinstalled skill back to trash when the index commit fails', async () => {
-    const base = mkdtempSync(join(tmpdir(), 'dsh-skill-manager-reinstall-'))
+    const base = mkdtempSync(join(tmpdir(), 'dsh-skill-dossier-reinstall-'))
     const root = join(base, 'skills')
     const trashDir = join(base, 'skill-manager', 'trash')
     const trashedPath = join(trashDir, 'alpha-1')
@@ -789,5 +924,112 @@ describe('single-package host activation', () => {
     expect(daily.status).toBe(200)
     expect(daily.body.projects).toEqual([])
     expect(daily.body.lastError).toBe('')
+  })
+})
+
+describe('report review runs', () => {
+  const report = {
+    period: '2026-09-01 ~ 2026-09-11',
+    projects: ['管理插件'],
+    completed: ['修好索引写路径'],
+    learnings: ['沙箱策略必须显式传'],
+    next: ['补 CI'],
+    openQuestions: [],
+    sourceBriefs: ['2026-09-11.md'],
+  }
+
+  function reviewHarness(options: {
+    files?: Map<string, string>
+    writeText?: (target: unknown, content: string) => Promise<void>
+    reportConfig?: unknown
+  } = {}) {
+    const followups: unknown[] = []
+    const host = hostContext({
+      files: options.files ?? new Map(),
+      followup: (message) => { followups.push(message) },
+      ...(options.writeText === undefined ? {} : { writeText: options.writeText }),
+    })
+    apply(host.ctx as never, { report: options.reportConfig } as never)
+    return { ...host, followups, route: host.routes.get('/api/report')! }
+  }
+
+  it('completes a run from the artifact appearing, never from a turn boundary', async () => {
+    const files = new Map<string, string>()
+    const host = reviewHarness({ files })
+    const date = currentDateKey()
+
+    const started = await post(host.route, { method: 'review', args: { sessionId: 'session-1' } })
+    expect(started.body).toMatchObject({ ok: true })
+    expect(typeof started.body.runId).toBe('string')
+
+    const running = await post(host.route, { method: 'reviewStatus', args: { sessionId: 'session-1', runId: started.body.runId } })
+    expect(running.body.run.status).toBe('running')
+
+    files.set(`reporter/Review/${date}.json`, JSON.stringify(report))
+    const done = await post(host.route, { method: 'reviewStatus', args: { sessionId: 'session-1', runId: started.body.runId } })
+    expect(done.body.run).toMatchObject({ status: 'done', artifact: 'json', report })
+    expect(done.body.run.baseline).toBeUndefined()
+  })
+
+  it('falls back to the markdown artifact when the structured contract drifts', async () => {
+    const files = new Map<string, string>()
+    const host = reviewHarness({ files })
+    const date = currentDateKey()
+
+    const started = await post(host.route, { method: 'review', args: { sessionId: 'session-1' } })
+    files.set(`reporter/Review/${date}.json`, '{"period":"x"}')
+    files.set(`reporter/Review/${date}.md`, '# 复盘\n正文')
+
+    const done = await post(host.route, { method: 'reviewStatus', args: { sessionId: 'session-1', runId: started.body.runId } })
+    expect(done.body.run).toMatchObject({ status: 'done', artifact: 'markdown' })
+    expect(String(done.body.run.structuredError)).toContain('缺少键')
+    expect(done.body.run.report).toBeUndefined()
+  })
+
+  it('fails a run that produces no artifact before the timeout', async () => {
+    const host = reviewHarness({ reportConfig: { runTimeoutMs: 1 } })
+    const started = await post(host.route, { method: 'review', args: { sessionId: 'session-1' } })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    const status = await post(host.route, { method: 'reviewStatus', args: { sessionId: 'session-1', runId: started.body.runId } })
+    expect(status.body.run.status).toBe('failed')
+    expect(String(status.body.run.error)).toContain('超时')
+  })
+
+  it('stops tracking on request without claiming the agent turn was aborted', async () => {
+    const host = reviewHarness()
+    const started = await post(host.route, { method: 'review', args: { sessionId: 'session-1' } })
+
+    const cancelled = await post(host.route, { method: 'cancelReview', args: { sessionId: 'session-1', runId: started.body.runId } })
+    expect(cancelled.body).toEqual({ ok: true })
+
+    const status = await post(host.route, { method: 'reviewStatus', args: { sessionId: 'session-1', runId: started.body.runId } })
+    expect(status.body.run.status).toBe('cancelled')
+    expect(String(status.body.run.error)).toContain('不会被中断')
+  })
+
+  it('appends review output into the brief without rewriting existing lines', async () => {
+    const date = currentDateKey()
+    const original = `---\ndate: ${date}\n---\n\n# Brief\n\n## 管理插件\n- 作用：管理技能\n- 今日进度：\n  1. 旧进度\n- 待办：\n- 问题：\n`
+    const files = new Map([[`reporter/brief/${date}.md`, original]])
+    const written: string[] = []
+    const host = reviewHarness({
+      files,
+      writeText: async (target, content) => { written.push(`${String(target)}::${String(content)}`) },
+    })
+
+    const result = await post(host.route, {
+      method: 'appendBrief',
+      args: { sessionId: 'session-1', date, project: '管理插件', items: { progress: ['新进度'], issues: ['待验证'] } },
+    })
+
+    expect(result.body).toMatchObject({ ok: true, appended: 2 })
+    const content = written.find((entry) => entry.includes('brief'))!.split('::')[1]!
+    expect(content).toContain('  1. 旧进度\n  2. 新进度')
+    expect(content).toContain('- 问题：\n  1. 待验证')
+    expect(content).toContain('- 作用：管理技能')
+    // 去掉新插入的两行后，必须与原文逐字节一致：只追加，不改写。
+    const stripped = content.split('\n').filter((line) => !line.includes('新进度') && !line.includes('待验证')).join('\n')
+    expect(stripped).toBe(original)
   })
 })

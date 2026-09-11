@@ -18,14 +18,15 @@ import { realpath } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { isAbsolute, join, relative, resolve as resolvePath } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { formatMatches, matchSkills, type SkillMatch, type SkillProfile } from './match.ts'
-import { DIRECTION_LABELS, detectDirections, isDirectionLabel } from './directions.ts'
+import { DIRECTION_LABELS, isDirectionLabel } from './directions.ts'
 import { formatReview, reviewCandidates } from './freshness.ts'
-import { formatUsage, recordUsage, skillGestures } from './usage.ts'
+import { recordUsage, skillGestures } from './usage.ts'
 import { atomicReplaceCommand, fsEntryOf, isWithin, mkdirCommand, moveNoClobberCommand, removeFileCommand, removeRecursiveCommand, trashDirOf } from './files.ts'
 import { isCrossSiteRequest, readJsonBody, respondJson } from './http.ts'
 import { createIndexStore } from './index-store.ts'
+import { estimateSkillTokens } from './tokens.ts'
 import { registerReportApi, type ReportAgentsLike, type ReportFsLike, type ReportSandboxPolicyLike, type ReportWebServerLike } from './report.ts'
+import { normalizeReportConfig } from './report-runs.ts'
 
 /** 与 base bundle 选择 bash/pwsh 的分支一致（process.platform === 'win32'）。 */
 const IS_WINDOWS = process.platform === 'win32'
@@ -90,7 +91,8 @@ interface FsLike {
   resolve(path: string, opts?: { cwd?: string }): Promise<unknown>
   readText(target: unknown): Promise<string>
   listDir(target: unknown): Promise<Array<{ name?: string; path?: string }>>
-  writeText(target: unknown, content: string, encoding?: unknown, options?: unknown, policy?: unknown): Promise<unknown>
+  /** 与 @deepseek-ai/dsh-fs 的 writeText(target, content, expected, signal, sandboxPolicy) 对齐。 */
+  writeText(target: unknown, content: string, expected?: unknown, signal?: unknown, policy?: unknown): Promise<unknown>
 }
 interface ShellRunResultLike {
   exitCode: number | null
@@ -113,7 +115,12 @@ interface WebRouteLike {
 }
 interface WebServerLike { register(route: WebRouteLike): () => void }
 
-export function apply(ctx: Context): void {
+/** 插件 config：目前只有汇报契约（目录/技能名/分派/定时），缺省即旧行为。 */
+export interface Config {
+  report?: unknown
+}
+
+export function apply(ctx: Context, config?: Config): void {
   const skills = ctx.get('skills') as SkillsLike | undefined
   const agents = ctx.get('agents') as AgentsLike | undefined
   const fs = ctx.get('fs') as FsLike | undefined
@@ -238,6 +245,17 @@ export function apply(ctx: Context): void {
     return error instanceof Error ? error.message : String(error)
   }
 
+  /** 从失败的 tools/result 里取一句可读原因（截断存放，避免撑大索引）。 */
+  function failureText(result: any): string {
+    const direct = typeof result?.error === 'string' ? result.error : ''
+    const blocks = Array.isArray(result?.content) ? result.content : []
+    const fromBlocks = blocks
+      .map((block: any) => (typeof block?.text === 'string' ? block.text : ''))
+      .join(' ')
+    const trimmed = `${direct} ${fromBlocks}`.replace(/\s+/g, ' ').trim()
+    return trimmed === '' ? '加载失败（未提供原因）' : trimmed.slice(0, 200)
+  }
+
   async function rollbackMoveAfterCommitFailure(
     operationError: unknown,
     source: string,
@@ -251,6 +269,17 @@ export function apply(ctx: Context): void {
         `索引提交失败：${errorMessage(operationError)}；文件回滚失败：${errorMessage(rollbackError)}`,
       )
     }
+  }
+
+  /**
+   * 索引写在自己描述的那个工作区里，所以策略必须是「以该工作区为根」的
+   * workspace-write。缺省策略走的是部署回退根（`sandbox-policy.workspaceRoot`，
+   * 默认 `process.cwd()`）——跨工作区打开的会话不在其下，fs 沙箱会以
+   * FS_SANDBOX_DENIED 拒绝写入，而这条写路径是档案、调用统计与生命周期提交的
+   * 共同出口，一旦被拒就是全量静默失效。
+   */
+  function indexWritePolicy(cwd: string): { mode: 'workspace-write'; workspaceRoot: string } {
+    return { mode: 'workspace-write', workspaceRoot: cwd }
   }
 
   const indexStore = createIndexStore({
@@ -275,7 +304,7 @@ export function apply(ctx: Context): void {
       await runShell(mkdirCommand(dir, IS_WINDOWS), join(cwd, '.dsh'))
       const temporaryTarget = await fs.resolve(temporaryPath, { cwd })
       try {
-        await fs.writeText(temporaryTarget, value)
+        await fs.writeText(temporaryTarget, value, undefined, undefined, indexWritePolicy(cwd))
         await runShell(atomicReplaceCommand(temporaryPath, targetPath, IS_WINDOWS), dir)
       } catch (error) {
         try { await runShell(removeFileCommand(temporaryPath, IS_WINDOWS), dir) } catch { /* best-effort temp cleanup */ }
@@ -311,13 +340,39 @@ export function apply(ctx: Context): void {
 
   // ---------- 技能调用埋点（次数/频率统计） ----------
 
-  /** 记录一次技能调用：读取 index → 折叠进 usage → 回写。 */
-  function recordSkillUse(cwd: string, name: string): void {
+  /** host logger 可能缺席（测试夹具/精简组合），缺失时只保留状态位。 */
+  const logger = (ctx as unknown as { logger?: { warn?: (message: string) => void } }).logger
+
+  /** 最近一次调用统计写入失败的原因；null = 正常。埋点失败不打断技能本身，
+   * 但绝不静默——面板据此提示「统计不可用」，而不是端出一张空表。 */
+  let usageWriteFailure: string | null = null
+
+  /** 记录一次技能调用：读取 index → 折叠进 usage 与实测结果 → 回写。 */
+  function recordSkillUse(cwd: string, name: string, failure?: string): void {
     if (!NAME_RE.test(name)) return
     void indexStore.update(cwd, (index) => {
-      recordUsage(index.usage, name, Date.now())
-    }).catch(() => {
-      // 埋点失败不打断技能本身；调用统计是可丢失的观察数据。
+      const at = Date.now()
+      recordUsage(index.usage, name, at)
+      const entry = index.skills[name]
+      if (entry !== undefined && entry !== null && typeof entry === 'object') {
+        const outcomes = entry.outcomes ?? { loaded: 0, failed: 0, lastAt: at }
+        if (failure === undefined) {
+          outcomes.loaded += 1
+          delete outcomes.lastError
+        } else {
+          outcomes.failed += 1
+          outcomes.lastError = failure
+        }
+        outcomes.lastAt = at
+        entry.outcomes = outcomes
+      }
+    }).then(() => {
+      usageWriteFailure = null
+    }, (error: unknown) => {
+      const message = errorMessage(error)
+      if (usageWriteFailure === message) return
+      usageWriteFailure = message
+      logger?.warn?.(`skill-manager: 技能调用统计写入失败（不打断技能本身）：${message}`)
     })
   }
 
@@ -330,13 +385,15 @@ export function apply(ctx: Context): void {
     }
     const onEvent = ctx.on as unknown as HostEventOn
     // ① 模型经 skill 工具加载（tools/result 为 emit，未作用域监听器收到所有 agent 的事件）。
+    // 成败都记：成功进 usage + loaded，失败进 failed 与 lastError——这是「实测」而非模型自述。
     onEvent('tools/result', (exec, result) => {
-      if (exec?.name !== 'skill' || result?.isError === true) return
+      if (exec?.name !== 'skill') return
       const name = exec?.arguments?.name
       if (typeof name !== 'string' || name === '') return
       const cwd = exec?.agent?.session?.header?.cwd
       if (typeof cwd !== 'string') return
-      recordSkillUse(cwd, name)
+      if (result?.isError !== true) { recordSkillUse(cwd, name); return }
+      recordSkillUse(cwd, name, failureText(result))
     })
     // ② 用户 /name 手势（模型工具之外的另一条调用路径）。
     onEvent('agent/inbox/claimed', (payload) => {
@@ -350,98 +407,6 @@ export function apply(ctx: Context): void {
         for (const name of skillGestures(block.text)) recordSkillUse(cwd, name)
       }
     })
-  }
-
-  // ---------- 技能匹配（模型工具 skill_match 与浏览器 RPC match 共用） ----------
-
-  /** 匹配结果集合。 */
-  interface MatchOutcome {
-    matches: SkillMatch[]
-    total: number
-    text: string
-  }
-
-  /**
-   * 从已建档技能中按相关性选出最匹配的候选。
-   * @param agent 当前会话 agent
-   * @param args { query, topK?, direction? }
-   * @returns 排序后的短名单与给模型看的文本
-   */
-  const runMatch = async (agent: AgentLike, args: any): Promise<MatchOutcome> => {
-    const query = typeof args?.query === 'string' ? args.query.trim() : ''
-    const cwd = agent.session.header.cwd
-    const index = await readIndex(cwd)
-    const profiles: SkillProfile[] = Object.values(index.skills).filter(
-      (e) => typeof e.direction === 'string' && e.direction !== '',
-    )
-    const total = profiles.length
-    if (query === '' || total === 0) {
-      return {
-        matches: [],
-        total,
-        text: total === 0
-          ? '还没有任何已建档技能（.dsh/skill-manager/index.json 为空）。先用 skill_archive 工具为技能建档。'
-          : '请先输入任务描述（query）。',
-      }
-    }
-    const lookup = { scope: agent as unknown, cwd }
-    let extraText = new Map<string, string>()
-    try {
-      const summaries = await skills.list(lookup)
-      extraText = new Map(summaries.map((s) => [s.name, `${s.description} ${typeof s.whenToUse === 'string' ? s.whenToUse : ''}`]))
-    } catch {
-      // 注册表描述缺失不影响匹配
-    }
-    const rawTopK = typeof args?.topK === 'number' ? Math.trunc(args.topK) : 5
-    const topK = Math.min(20, Math.max(1, Number.isFinite(rawTopK) ? rawTopK : 5))
-    const direction = typeof args?.direction === 'string' && args.direction.trim() !== '' ? args.direction.trim() : undefined
-    const matches = matchSkills(query, profiles, { topK, direction }, extraText)
-    let text = formatMatches(matches, total, query)
-    if (matches.length === 0 && direction === undefined) {
-      const dirs = [...new Set(profiles.map((p) => p.direction).filter((d): d is string => typeof d === 'string' && d !== ''))]
-      text += `\n当前已建档技能的方向分类：${dirs.join('、')}。可指定 direction 过滤。`
-    }
-    return { matches, total, text }
-  }
-
-  /**
-   * 两段式路由：先用关键词命中判方向，再在命中方向内做词法检索。
-   * 未命中方向时退化为全局检索并提示可选方向。
-   * @param agent 当前会话 agent
-   * @param args { query, topK? }
-   */
-  const runRoute = async (agent: AgentLike, args: any): Promise<MatchOutcome> => {
-    const query = typeof args?.query === 'string' ? args.query.trim() : ''
-    if (query === '') return runMatch(agent, args)
-    const cwd = agent.session.header.cwd
-    const index = await readIndex(cwd)
-    const profiles: SkillProfile[] = Object.values(index.skills).filter(
-      (e) => typeof e.direction === 'string' && e.direction !== '',
-    )
-    const total = profiles.length
-    if (total === 0) return runMatch(agent, args)
-    const lookup = { scope: agent as unknown, cwd }
-    let extraText = new Map<string, string>()
-    try {
-      const summaries = await skills.list(lookup)
-      extraText = new Map(summaries.map((s) => [s.name, `${s.description} ${typeof s.whenToUse === 'string' ? s.whenToUse : ''}`]))
-    } catch {
-      // 注册表描述缺失不影响匹配
-    }
-    const rawTopK = typeof args?.topK === 'number' ? Math.trunc(args.topK) : 5
-    const topK = Math.min(20, Math.max(1, Number.isFinite(rawTopK) ? rawTopK : 5))
-
-    const dirs = detectDirections(query)
-    const scoped = dirs.length === 0 ? profiles : profiles.filter((p) => p.direction !== undefined && dirs.includes(p.direction))
-    const matches = matchSkills(query, scoped, { topK }, extraText)
-    let text: string
-    if (dirs.length === 0) {
-      text = formatMatches(matches, total, query)
-      text += `\n（未命中方向关键词，已做全局检索；可指定方向：${DIRECTION_LABELS.join('、')}）`
-    } else {
-      text = `命中方向：${dirs.join('、')}\n\n${formatMatches(matches, scoped.length, query)}`
-    }
-    return { matches, total, text }
   }
 
   // ---------- 模型工具：skill_archive ----------
@@ -521,113 +486,6 @@ export function apply(ctx: Context): void {
     })
 
     tools.register({
-      name: 'skill_match',
-      description: '从已建档技能中找出最适合当前任务的技能。给定当前任务的一句话描述，读取工作区 .dsh/skill-manager/index.json 里的技能档案（方向/使用范围/能力边界/应用场景），按相关性返回最匹配的候选。当需要决定调用哪个 skill、或在多个技能间拿不准时使用；命中候选后再用 skill 工具加载其全文。',
-      parameters: {
-        type: 'object',
-        properties: {
-          query: { type: 'string', description: '当前任务/目标的一句话描述（中文或英文），例如「调研某城市未来 20 年发展」「帮我写一个登录页面」' },
-          topK: { type: 'integer', description: '返回最相关的候选条数，默认 5，范围 1-20' },
-          direction: { type: 'string', description: `可选：只在该方向分类内匹配（${DIRECTION_LABELS.join('/')}）` },
-        },
-        required: ['query'],
-      },
-      output: {
-        schema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            matches: {
-              type: 'array',
-              items: {
-                type: 'object',
-                additionalProperties: false,
-                properties: {
-                  name: { type: 'string' },
-                  direction: { type: 'string' },
-                  useScope: { type: 'string' },
-                  scenarios: { type: 'string' },
-                  score: { type: 'number' },
-                  matched: { type: 'array', items: { type: 'string' } },
-                },
-              },
-            },
-            total: { type: 'integer' },
-            text: { type: 'string' },
-          },
-        },
-        render: (_args: unknown, value: any) => [{ type: 'text', text: String(value.text ?? '') }],
-      },
-      async execute(args: any, exec: any): Promise<{ matches: SkillMatch[]; total: number; text: string }> {
-        const query = typeof args.query === 'string' ? args.query.trim() : ''
-        if (query === '') throw new Error('请提供 query：当前任务的一句话描述')
-        const agent = exec.agent as AgentLike | undefined
-        if (agent === undefined) throw new Error('无法确定当前会话')
-        return runMatch(agent, args)
-      },
-    })
-
-    tools.register({
-      name: 'skill_route',
-      description: '两段式技能路由：先用关键词命中判断任务属于哪个方向（工程代码/前端视觉/调研报告/内容写作/知识库/记忆会话/多代理编排/本地模型/元技能/命理玄学），再返回该方向内最相关的技能候选。比 skill_match 更省 token、更聚焦；命中候选后用 skill 工具加载全文。',
-      parameters: {
-        type: 'object',
-        properties: {
-          query: { type: 'string', description: '当前任务/目标的一句话描述，例如「调研某行业前景」「写一个落地页」' },
-          topK: { type: 'integer', description: '返回最相关的候选条数，默认 5，范围 1-20' },
-        },
-        required: ['query'],
-      },
-      output: {
-        schema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            matches: { type: 'array', items: { type: 'object', additionalProperties: true } },
-            total: { type: 'integer' },
-            text: { type: 'string' },
-          },
-        },
-        render: (_args: unknown, value: any) => [{ type: 'text', text: String(value.text ?? '') }],
-      },
-      async execute(args: any, exec: any): Promise<{ matches: SkillMatch[]; total: number; text: string }> {
-        const query = typeof args.query === 'string' ? args.query.trim() : ''
-        if (query === '') throw new Error('请提供 query：当前任务的一句话描述')
-        const agent = exec.agent as AgentLike | undefined
-        if (agent === undefined) throw new Error('无法确定当前会话')
-        return runRoute(agent, args)
-      },
-    })
-
-    tools.register({
-      name: 'skill_usage',
-      description: '查看技能被调用的次数与频率统计（由本插件自动记录：模型经 skill 工具加载、或用户用 /name 手势调用都会计数）。省略 name 返回所有被调用过的技能（按次数降序）；给定 name 只看该技能的明细。',
-      parameters: {
-        type: 'object',
-        properties: {
-          name: { type: 'string', description: '可选：只看某个技能（kebab-case）；省略则返回所有被调用过的技能' },
-        },
-      },
-      output: {
-        schema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            text: { type: 'string' },
-          },
-        },
-        render: (_args: unknown, value: any) => [{ type: 'text', text: String(value.text ?? '') }],
-      },
-      async execute(args: any, exec: any): Promise<{ text: string }> {
-        const agent = exec.agent as AgentLike | undefined
-        if (agent === undefined) throw new Error('无法确定当前会话')
-        const index = await readIndex(agent.session.header.cwd)
-        const name = typeof args?.name === 'string' && args.name.trim() !== '' ? args.name.trim() : undefined
-        return { text: formatUsage(index.usage, name, Date.now()) }
-      },
-    })
-
-    tools.register({
       name: 'skill_review',
       description: '找出待复审的技能（保鲜信号）：易变方向 + 长期未用 + 从未/久未复审，按优先级排序。用于决定「哪个 skill 该跑一轮 darwin-skill 评测/更新」。',
       parameters: {
@@ -654,42 +512,6 @@ export function apply(ctx: Context): void {
         const topK = Math.min(50, Math.max(1, Number.isFinite(rawTopK) ? rawTopK : 10))
         const entries = reviewCandidates(index.skills, index.usage, Date.now(), topK)
         return { text: formatReview(entries, Object.keys(index.skills).length) }
-      },
-    })
-
-    tools.register({
-      name: 'skill_eval',
-      description: '触发对某个技能的有效性评测（对话框外）：加载 darwin-skill，用「带 skill vs 不带 skill」对比 + 中立 judge 评测该技能，然后用 record_eval 工具把结论写回档案。',
-      parameters: {
-        type: 'object',
-        properties: {
-          name: { type: 'string', description: '要评测的技能名（kebab-case）' },
-        },
-        required: ['name'],
-      },
-      output: {
-        schema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            ok: { type: 'boolean' },
-            message: { type: 'string' },
-          },
-        },
-        render: (_args: unknown, value: any) => [{ type: 'text', text: String(value.message ?? '') }],
-      },
-      async execute(args: any, exec: any): Promise<{ ok: boolean; message: string }> {
-        const name = typeof args.name === 'string' ? args.name.trim() : ''
-        if (!NAME_RE.test(name)) throw new Error(`无效的技能名：${name}`)
-        const agent = exec.agent as (AgentLike & { followup(message: unknown): void }) | undefined
-        if (agent === undefined) throw new Error('无法确定当前会话')
-        const lookup = { scope: agent as unknown, cwd: agent.session.header.cwd }
-        const summary = (await skills.list(lookup)).find((s) => s.name === name)
-        if (summary === undefined) throw new Error(`技能 "${name}" 不存在`)
-        agent.followup(userMessage(
-          `请加载 darwin-skill，对技能「${name}」做一轮有效性评测：用「带 skill vs 不带 skill」跑同一基准任务、让中立 judge 打分，得出 score(0-10) 与 delta 描述，然后用 record_eval 工具把结论写回。`,
-        ))
-        return { ok: true, message: `已触发对技能 "${name}" 的评测（对话框外执行）` }
       },
     })
 
@@ -747,8 +569,11 @@ export function apply(ctx: Context): void {
       const sessionId = args?.sessionId
       const summaries = await skills.list(viewOptions(sessionId))
       const index = await readIndex(cwdOf(sessionId))
-      return {
-        skills: summaries.map((s) => ({
+      let catalogTokens = 0
+      const entries = summaries.map((s) => {
+        const approxTokens = estimateSkillTokens(s.name, s.description, typeof s.whenToUse === 'string' ? s.whenToUse : '')
+        catalogTokens += approxTokens
+        return {
           name: s.name,
           description: s.description,
           whenToUse: typeof s.whenToUse === 'string' ? s.whenToUse : null,
@@ -757,9 +582,10 @@ export function apply(ctx: Context): void {
           source: s.source,
           provider: s.provider,
           owned: isOwned(sessionId, s.name),
-        })),
-        index,
-      }
+          approxTokens,
+        }
+      })
+      return { skills: entries, index, usageHealth: usageWriteFailure, catalogTokens }
     },
 
     async get(args) {
@@ -826,7 +652,7 @@ export function apply(ctx: Context): void {
           current()
           state.registrations.delete(name)
         }
-        const provider = `dsh-skill-manager:${uuid4()}`
+        const provider = `dsh-skill-dossier:${uuid4()}`
         let dispose: () => void
         try {
           dispose = scopedSkills.register({
@@ -893,14 +719,6 @@ export function apply(ctx: Context): void {
       if (skill.invocation.userInvocable !== true) return { ok: false, error: '该技能不允许用户显式调用' }
       agent.followup(userMessage(`/${name}`))
       return { ok: true }
-    },
-
-    async match(args) {
-      const sessionId = typeof args?.sessionId === 'string' ? args.sessionId : undefined
-      const agent = agentOf(sessionId)
-      if (agent === undefined) return { ok: false, error: '当前会话没有活跃的 agent' }
-      const outcome = await runMatch(agent, args)
-      return { ok: true, ...outcome }
     },
 
     async ingest(args) {
@@ -1064,17 +882,23 @@ export function apply(ctx: Context): void {
     ctx.effect(() => webServer.register({ kind: 'exact', path: '/api/skill-manager', handler: routeHandler }))
   }
   if (webServer !== undefined && agents !== undefined && fs !== undefined && sandboxPolicy !== undefined) {
+    const reportConfig = normalizeReportConfig(config?.report)
+    const timer = ctx.get('timer') as { interval?: (callback: () => void, delay: number) => () => void } | undefined
     registerReportApi(ctx, {
       webServer: webServer as unknown as ReportWebServerLike,
       agents: agents as unknown as ReportAgentsLike,
       fs: fs as unknown as ReportFsLike,
       sandboxPolicy: sandboxPolicy as unknown as ReportSandboxPolicyLike,
-      ensureDirectories: async (cwd, sessionId) => {
+      config: reportConfig,
+      ...(typeof timer?.interval === 'function'
+        ? { interval: (callback: () => void, delayMs: number) => timer.interval!(callback, delayMs) }
+        : {}),
+      ensureDirectories: async (cwd, sessionId, active) => {
         const agent = agents.get(sessionId)
         if (agent === undefined) throw new Error('找不到对应 agent（会话可能已结束）')
         const policy = sandboxPolicy.resolve({ session: agent.session })
-        for (const dir of ['brief', 'Review', 'export']) {
-          const target = join(cwd, 'reporter', dir)
+        for (const dir of [active.briefDir, active.reviewDir, active.exportDir]) {
+          const target = join(cwd, active.dataRoot, dir)
           await runShell(mkdirCommand(target, IS_WINDOWS), target, policy)
         }
       },

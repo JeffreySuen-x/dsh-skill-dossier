@@ -1,3 +1,3 @@
 import { clientBundle } from './scripts/tsdown.client.ts'
 
-export default clientBundle('dsh-skill-manager', ['lib/types/index.js'])
+export default clientBundle('dsh-skill-dossier', ['lib/types/index.js'])

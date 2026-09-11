@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, relative, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-const scratch = mkdtempSync(join(tmpdir(), 'dsh-skill-manager-pack-'))
+const scratch = mkdtempSync(join(tmpdir(), 'dsh-skill-dossier-pack-'))
 const sourceRoot = fileURLToPath(new URL('..', import.meta.url))
 
 function runNpm(args, options = {}) {
@@ -36,7 +36,7 @@ try {
     '--cache', 'npm-cache', `./${join('packed', packed.filename)}`,
   ], { cwd: scratch, stdio: 'pipe' })
 
-  const packageRoot = join(installRoot, 'node_modules', 'dsh-skill-manager')
+  const packageRoot = join(installRoot, 'node_modules', 'dsh-skill-dossier')
   const required = [
     'LICENSE', 'README.md', 'cordis.patch.yml', 'lib/index.js', 'lib/client.js', 'lib/client.js.map', 'lib/types/index.d.ts',
   ]

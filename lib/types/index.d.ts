@@ -8,5 +8,9 @@ export declare const name = "skill-manager";
  * applying early and silently skipping registrations (insert rows may mount
  * before some bundle rows have activated). */
 export declare const inject: string[];
-export declare function apply(ctx: Context): void;
+/** 插件 config：目前只有汇报契约（目录/技能名/分派/定时），缺省即旧行为。 */
+export interface Config {
+    report?: unknown;
+}
+export declare function apply(ctx: Context, config?: Config): void;
 //# sourceMappingURL=index.d.ts.map

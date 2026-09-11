@@ -29,7 +29,7 @@ function createTempOnAnotherVolume(excludedPath: string): string | undefined {
   for (const root of result.stdout.split(/\r?\n/u).map((value) => value.trim()).filter(Boolean)) {
     if (parse(root).root.toLowerCase() === excludedRoot) continue
     try {
-      return mkdtempSync(join(root, 'dsh-skill-manager-volume-'))
+      return mkdtempSync(join(root, 'dsh-skill-dossier-volume-'))
     } catch {
       // A mounted volume can be ready but not writable by the runner account.
     }
@@ -41,7 +41,7 @@ describe.runIf(process.platform === 'win32')('Windows lifecycle runtime', () => 
   let base: string
 
   beforeEach(() => {
-    base = mkdtempSync(join(tmpdir(), 'dsh-skill-manager-[runtime]-'))
+    base = mkdtempSync(join(tmpdir(), 'dsh-skill-dossier-[runtime]-'))
   })
 
   afterEach(() => {

@@ -1,7 +1,7 @@
 {
-  "name": "dsh-skill-manager",
+  "name": "dsh-skill-dossier",
   "description": "DSH skill lifecycle and work-report plugin: catalog, routing, usage, lifecycle actions, plus daily/monthly/review/export reports from reporter/brief. Cross-platform design for Windows/Linux/macOS.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "packageManager": "pnpm@11.7.0",
   "type": "module",
   "main": "lib/index.js",

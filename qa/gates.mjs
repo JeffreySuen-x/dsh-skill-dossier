@@ -14,7 +14,7 @@ const gates = [
 
 let passed = 0
 const failed = []
-console.log('== gates: dsh-skill-manager ==')
+console.log('== gates: dsh-skill-dossier ==')
 for (const [name, [command, ...args]] of gates) {
   if (!requested.has(name)) continue
   const executable = process.platform === 'win32' && command.endsWith('.cmd')

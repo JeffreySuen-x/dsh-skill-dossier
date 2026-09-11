@@ -1,3 +1,4 @@
+import { type ReportConfig, type ReviewReport } from './report-runs.ts';
 export interface ReportProject {
     name: string;
     purpose: string;
@@ -14,8 +15,9 @@ export interface ReportFsLike {
     listDir(target: unknown): Promise<Array<{
         name?: string;
         path?: string;
+        target?: unknown;
     }>>;
-    writeText(target: unknown, content: string, encoding?: unknown, options?: unknown, policy?: unknown): Promise<unknown>;
+    writeText(target: unknown, content: string, expected?: unknown, signal?: unknown, policy?: unknown): Promise<unknown>;
 }
 interface ReportAgentLike {
     session: {
@@ -44,12 +46,38 @@ export interface ReportWebServerLike {
 interface EffectContextLike {
     effect(setup: () => () => void): unknown;
 }
+/** 一次复盘的运行记录（内存态；产物落盘才是完成判据）。 */
+export interface ReviewRun {
+    id: string;
+    date: string;
+    status: 'running' | 'done' | 'failed' | 'cancelled';
+    startedAt: number;
+    endedAt?: number;
+    skill: string;
+    dispatch: 'session' | 'subagent';
+    markdownPath: string;
+    jsonPath: string;
+    /** 完成时产物里带了哪一份。 */
+    artifact?: 'json' | 'markdown';
+    report?: ReviewReport;
+    /** 结构化产物不合约时的原因（不致命：回退 markdown）。 */
+    structuredError?: string;
+    error?: string;
+    /** 入队时两份产物的内容快照——「内容变了」才算完成，仅内部使用。 */
+    baseline?: {
+        json?: string | undefined;
+        markdown?: string | undefined;
+    };
+}
 export interface ReportDependencies {
     webServer: ReportWebServerLike;
     agents: ReportAgentsLike;
     fs: ReportFsLike;
     sandboxPolicy: ReportSandboxPolicyLike;
-    ensureDirectories(cwd: string, sessionId: string): Promise<void>;
+    ensureDirectories(cwd: string, sessionId: string, config: ReportConfig): Promise<void>;
+    config?: ReportConfig;
+    /** cordis timer 服务；缺失则定时复盘不可用（不影响手动复盘）。 */
+    interval?: (callback: () => void, delayMs: number) => () => void;
 }
 /** Parse the brief skill's stable markdown contract. */
 export declare function parseBrief(text: string): ReportProject[];

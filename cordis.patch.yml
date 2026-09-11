@@ -1,5 +1,5 @@
 # 组合包层：profile 列出本 bundle 时应用，把 host 半插进组合。
 # client 半由 @deepseek-ai/dsh-client-modules 按 dsh.client 声明自动发现，无需在此列行。
 - insert:
-    - id: skill-manager
-      name: 'dsh-skill-manager'
+    - id: skill-dossier
+      name: 'dsh-skill-dossier'

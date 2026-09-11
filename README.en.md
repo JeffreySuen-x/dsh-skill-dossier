@@ -1,0 +1,105 @@
+# dsh-skill-dossier
+
+English · [中文](./README.md)
+
+A **skill dossier + work report** plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH). It turns the skills scattered across `~/.dsh/skills`, `.dsh/skills` and `~/.agents/skills` into a dossier you can read, verify and keep fresh — and rolls your daily engineering briefs into daily / monthly / retrospective views.
+
+One package, three panels:
+
+| Panel | What it does |
+|---|---|
+| **Skills** | Browse, search, read details, one-click `/name` into the composer; disable (reversible trash) · reinstall · delete; session-scoped temporary skills |
+| **Dossier** | Per-skill profile: direction (10 categories), use scope, capability boundaries, scenarios, origin, call stats, **observed load success/failure**, **catalog token cost**, freshness review, evaluation verdicts |
+| **Report** | Daily/monthly rollups from `reporter/brief/YYYY-MM-DD.md`; **retrospective** (invokes a skill by name, trackable, stoppable), structured artifact, **write-back into the brief**, md/json export, optional scheduling |
+
+> The report half is an **optional module**: `dataRoot` is configurable and defaults to `reporter/brief/` inside the workspace. Ignore it and it is just a panel nobody opens — the skill and dossier halves are unaffected.
+
+## Why a "dossier"
+
+Comparable plugins stop at "list them, toggle them". This one goes one step further: **it profiles each skill and verifies it with observation instead of the model's own claim.**
+
+- **Profile fields**: direction / use scope / capability boundaries / scenarios / origin (self · external · system · unmarked) / authored at / reviewed at / content hash
+- **Observed outcomes**: subscribes to DSH's official `tools/result` event; a `skill` load that succeeds is recorded ✅, a failure ❌ with its error — not "the model says it is useful" but "did it actually load"
+- **Evaluation verdict**: `record_eval` writes back score (0-10) / baselineDelta / effective · ineffective · pending, complementing observation (one says "did it run", the other says "was it worth it")
+- **Catalog cost**: estimates ≈tokens each skill's name+description occupies in the system prompt, answering "who is eating the context"
+- **Freshness review**: ranks by "volatile direction + long unused + long unreviewed", telling the model or the human exactly which skills to revisit
+
+## Install
+
+Requires Node `^22.19.0 || >=24.0.0` and an installed DSH (`npx @deepseek-ai/dsh web` once is enough).
+
+```sh
+# npm
+dsh plugin --profile web add dsh-skill-dossier
+
+# GitHub
+dsh plugin --profile web add github:JeffreySuen-x/dsh-skill-dossier
+
+# local directory (development)
+dsh plugin --profile web add link:/absolute/path/dsh-skill-dossier
+```
+
+The repository **commits its `lib/` build artifacts**, so a git install works as-is with no build-script authorization.
+
+## Model-facing tools
+
+| Tool | Purpose |
+|---|---|
+| `skill_archive` | Write a skill profile (direction / use scope / boundaries / scenarios / origin) |
+| `skill_review` | List skills due for review (freshness ranking) |
+| `record_eval` | Write an evaluation verdict (score / baselineDelta / conclusion) back into the dossier |
+
+> The earlier `skill_match` / `skill_route` / `skill_usage` / `skill_eval` tools were removed: DSH already puts the skill catalog (name + description) into the system prompt and lets the model choose, so a lexical router on top showed no measured benefit (8 weeks on the author's machine: 233 `skill` calls vs 0 `skill_match` and 1 `skill_route`). The data is still recorded — it just no longer has its own panel and tools.
+
+## Configuration
+
+Every config key has a default; not configuring anything equals the previous behaviour. Override it in the profile's `cordis.patch.yml` under `id: skill-dossier`:
+
+```yaml
+- id: skill-dossier
+  config:
+    report:
+      dataRoot: reporter        # report data root
+      briefDir: brief           # daily brief directory
+      reviewDir: Review         # retrospective artifacts
+      exportDir: export         # exports
+      reviewSkill: aeon-review  # skill invoked by name for a retrospective (empty = inline steps only)
+      dispatch: session         # session | subagent
+      runTimeoutMs: 600000      # how long to wait for artifacts
+      schedule:
+        enabled: false          # scheduled retrospective, off by default
+        hour: 22                # only fire after this hour
+        checkMinutes: 30        # check interval
+```
+
+Note: DSH's patch layer **replaces** the whole config rather than merging, so restate the keys you care about (unlisted keys fall back to the code defaults).
+
+## Build from source
+
+```sh
+pnpm install        # build tooling + type dependencies (@deepseek-ai/* are public packages)
+pnpm run build      # tsc emits lib/types, tsdown bundles lib/index.js and lib/client.js
+pnpm run test       # unit + integration tests
+node qa/gates.mjs   # test / typecheck / build / pack gates
+```
+
+After editing `src/`, run `pnpm run build` and commit `lib/` — CI enforces `git diff --exit-code -- lib` so the two never drift.
+
+## Platform support
+
+Windows / Linux / macOS. Lifecycle file operations emit pwsh (Windows, native `MoveFileExW`) or bash (POSIX) commands; `tests/windows-runtime.spec.ts` exercises the real Windows syscall on a Windows runner.
+
+## Known boundaries
+
+- **Web profile only**: the host half hard-depends on the `webServer` service and cannot be installed headless.
+- **Call stats are observational**: only calls made while the plugin is running are counted; historical calls cannot be reconstructed. A failed stats write never interrupts a skill, but it is **no longer silent** — the panel shows the failure and its reason.
+- **A retrospective completes when its artifact lands on disk**, not when "some turn ended". DSH's prompt receipt does not tie to `turn/end`; correlating by MessageId mis-attributes when other work interleaves. So the plugin only asks one question: did the artifact content change since enqueue? The cost: if the agent writes nothing, the run reports a timeout only after `runTimeoutMs`.
+- **"Stop tracking" is not an abort**: it stops status tracking and settles the record, but does **not** interrupt the agent turn already in flight.
+- **Scheduled retrospectives only run while the DSH process is alive** and need a recent session in that workspace; nothing is triggered without new content that day, and missed runs are not replayed. Off by default.
+- **Lifecycle moves require one filesystem**: a skill entry and its trash directory on different mounts are refused safely before any file changes; there is no non-atomic copy-delete.
+- **Windows/Linux regressions are wired into CI** but only count as "actually run" once GitHub Actions is green.
+- The structured retrospective artifact (`<reviewDir>/<date>.json`) is **validated on write**: exactly seven keys, no extras. A drifted contract falls back to rendering markdown instead of blanking the panel.
+
+## License
+
+MIT

@@ -1,7 +1,19 @@
 import { isCrossSiteRequest, readJsonBody, respondJson } from './http.ts'
+import {
+  appendBriefItems,
+  briefHasProgress,
+  buildReviewPrompt,
+  DEFAULT_REPORT_CONFIG,
+  reviewArtifacts,
+  type BriefItems,
+  type ReportConfig,
+  type ReviewReport,
+  validateReviewReport,
+} from './report-runs.ts'
 
 const MAX_BODY_BYTES = 1024 * 1024
-const DATA_ROOT = 'reporter'
+/** 保留的运行记录条数（内存态；历史看产物目录，不落额外状态文件）。 */
+const RUN_HISTORY = 20
 
 export interface ReportProject {
   name: string
@@ -15,8 +27,8 @@ export interface ReportProject {
 export interface ReportFsLike {
   resolve(path: string, opts?: { cwd?: string }): Promise<unknown>
   readText(target: unknown): Promise<string>
-  listDir(target: unknown): Promise<Array<{ name?: string; path?: string }>>
-  writeText(target: unknown, content: string, encoding?: unknown, options?: unknown, policy?: unknown): Promise<unknown>
+  listDir(target: unknown): Promise<Array<{ name?: string; path?: string; target?: unknown }>>
+  writeText(target: unknown, content: string, expected?: unknown, signal?: unknown, policy?: unknown): Promise<unknown>
 }
 
 interface ReportAgentLike {
@@ -46,12 +58,42 @@ interface EffectContextLike {
   effect(setup: () => () => void): unknown
 }
 
+/** 一次复盘的运行记录（内存态；产物落盘才是完成判据）。 */
+export interface ReviewRun {
+  id: string
+  date: string
+  status: 'running' | 'done' | 'failed' | 'cancelled'
+  startedAt: number
+  endedAt?: number
+  skill: string
+  dispatch: 'session' | 'subagent'
+  markdownPath: string
+  jsonPath: string
+  /** 完成时产物里带了哪一份。 */
+  artifact?: 'json' | 'markdown'
+  report?: ReviewReport
+  /** 结构化产物不合约时的原因（不致命：回退 markdown）。 */
+  structuredError?: string
+  error?: string
+  /** 入队时两份产物的内容快照——「内容变了」才算完成，仅内部使用。 */
+  baseline?: { json?: string | undefined; markdown?: string | undefined }
+}
+
+/** 运行记录对外形状：剥掉内部快照。 */
+function publicRun(run: ReviewRun): Omit<ReviewRun, 'baseline'> & { elapsedMs: number } {
+  const { baseline: _baseline, ...rest } = run
+  return { ...rest, elapsedMs: Date.now() - run.startedAt }
+}
+
 export interface ReportDependencies {
   webServer: ReportWebServerLike
   agents: ReportAgentsLike
   fs: ReportFsLike
   sandboxPolicy: ReportSandboxPolicyLike
-  ensureDirectories(cwd: string, sessionId: string): Promise<void>
+  ensureDirectories(cwd: string, sessionId: string, config: ReportConfig): Promise<void>
+  config?: ReportConfig
+  /** cordis timer 服务；缺失则定时复盘不可用（不影响手动复盘）。 */
+  interval?: (callback: () => void, delayMs: number) => () => void
 }
 
 /** Parse the brief skill's stable markdown contract. */
@@ -167,9 +209,19 @@ function statsOf(projects: ReportProject[]) {
   }
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
 /** Register `/api/report` as part of the manager package's host activation. */
 export function registerReportApi(ctx: EffectContextLike, deps: ReportDependencies): void {
   const { webServer, agents, fs, sandboxPolicy, ensureDirectories } = deps
+  const config = deps.config ?? DEFAULT_REPORT_CONFIG
+  const runs = new Map<string, ReviewRun>()
+  /** 每个工作区最近一次汇报调用的会话：定时复盘需要一个能驱动 agent 的会话。 */
+  const lastSessionByCwd = new Map<string, string>()
+  /** 已触发过定时复盘的日期（每工作区每天一次）。 */
+  const scheduledOn = new Map<string, string>()
 
   function cwdOf(sessionId: unknown): string {
     if (typeof sessionId !== 'string') return ''
@@ -181,15 +233,31 @@ export function registerReportApi(ctx: EffectContextLike, deps: ReportDependenci
     return agent === undefined ? sandboxPolicy.resolve() : sandboxPolicy.resolve({ session: agent.session })
   }
 
+  function rememberSession(sessionId: unknown): void {
+    const cwd = cwdOf(sessionId)
+    if (cwd !== '' && typeof sessionId === 'string') lastSessionByCwd.set(cwd, sessionId)
+  }
+
+  const briefPath = (date: string) => `${config.dataRoot}/${config.briefDir}/${date}.md`
+
+  async function readTextOrUndefined(path: string, cwd: string): Promise<string | undefined> {
+    try {
+      return await fs.readText(await fs.resolve(path, { cwd }))
+    } catch (error) {
+      if (error !== null && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return undefined
+      throw error
+    }
+  }
+
   async function readBrief(cwd: string, date: string) {
-    const relativePath = `${DATA_ROOT}/brief/${date}.md`
+    const relativePath = briefPath(date)
     const target = await fs.resolve(relativePath, { cwd })
     const text = await fs.readText(target)
     return { path: relativePath, date: extractDate(text) || date, projects: parseBrief(text) }
   }
 
   async function listBriefDates(cwd: string): Promise<string[]> {
-    const target = await fs.resolve(`${DATA_ROOT}/brief`, { cwd })
+    const target = await fs.resolve(`${config.dataRoot}/${config.briefDir}`, { cwd })
     let entries: Array<{ name?: string; path?: string }>
     try {
       entries = await fs.listDir(target)
@@ -203,30 +271,52 @@ export function registerReportApi(ctx: EffectContextLike, deps: ReportDependenci
     }).sort()
   }
 
+  async function listReviewArtifacts(cwd: string): Promise<Array<{ date: string; markdown: boolean; json: boolean }>> {
+    const target = await fs.resolve(`${config.dataRoot}/${config.reviewDir}`, { cwd })
+    let entries: Array<{ name?: string; path?: string }>
+    try {
+      entries = await fs.listDir(target)
+    } catch (error) {
+      if (error !== null && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return []
+      throw error
+    }
+    const byDate = new Map<string, { date: string; markdown: boolean; json: boolean }>()
+    for (const entry of entries) {
+      const name = String(entry.name ?? entry.path ?? '')
+      const match = name.match(/^(\d{4}-\d{2}-\d{2})\.(md|json)$/)
+      if (match?.[1] === undefined || match[2] === undefined) continue
+      const record = byDate.get(match[1]) ?? { date: match[1], markdown: false, json: false }
+      if (match[2] === 'md') record.markdown = true
+      else record.json = true
+      byDate.set(match[1], record)
+    }
+    return [...byDate.values()].sort((a, b) => b.date.localeCompare(a.date))
+  }
+
   async function generateDaily(args: any) {
     const cwd = cwdOf(args?.sessionId)
     const today = localDateKey()
     const emptyStats = { projects: 0, progress: 0, todo: 0, issues: 0 }
-    if (cwd === '') return { date: today, projects: [], stats: emptyStats, source: `${DATA_ROOT}/brief/`, lastError: '无法确定工作区目录' }
+    if (cwd === '') return { date: today, projects: [], stats: emptyStats, source: `${config.dataRoot}/${config.briefDir}/`, lastError: '无法确定工作区目录' }
     try {
       const pick = pickDailyDate(await listBriefDates(cwd), today)
-      if (pick.date === '') return { date: today, projects: [], stats: emptyStats, source: `${DATA_ROOT}/brief/`, lastError: '' }
+      if (pick.date === '') return { date: today, projects: [], stats: emptyStats, source: `${config.dataRoot}/${config.briefDir}/`, lastError: '' }
       const result = await readBrief(cwd, pick.date)
       return { date: result.date, projects: result.projects, stats: statsOf(result.projects), source: result.path, lastError: '', fallbackFrom: pick.fallbackFrom }
     } catch (error) {
-      return { date: today, projects: [], stats: emptyStats, source: `${DATA_ROOT}/brief/`, lastError: errorMessage(error) }
+      return { date: today, projects: [], stats: emptyStats, source: `${config.dataRoot}/${config.briefDir}/`, lastError: errorMessage(error) }
     }
   }
 
   async function generateMonthly(args: any) {
     const cwd = cwdOf(args?.sessionId)
     const currentMonth = localDateKey().slice(0, 7)
-    if (cwd === '') return { month: currentMonth, days: [], projects: [], source: `${DATA_ROOT}/brief/`, lastError: '无法确定工作区目录', fallbackMonth: '' }
+    if (cwd === '') return { month: currentMonth, days: [], projects: [], source: `${config.dataRoot}/`, lastError: '无法确定工作区目录', fallbackMonth: '' }
     let dates: string[] = []
     try {
       dates = await listBriefDates(cwd)
     } catch (error) {
-      return { month: currentMonth, days: [], projects: [], source: `${DATA_ROOT}/brief/`, lastError: errorMessage(error), fallbackMonth: '' }
+      return { month: currentMonth, days: [], projects: [], source: `${config.dataRoot}/`, lastError: errorMessage(error), fallbackMonth: '' }
     }
     const pick = pickMonth(dates, currentMonth)
     const days: Array<{ date: string; projects: string[]; progress: string[]; todo: string[]; issues: string[] }> = []
@@ -259,54 +349,217 @@ export function registerReportApi(ctx: EffectContextLike, deps: ReportDependenci
       month: pick.month,
       days,
       projects: [...projects.values()],
-      source: `${DATA_ROOT}/brief/`,
+      source: `${config.dataRoot}/${config.briefDir}/`,
       lastError: skipped.length === 0 ? '' : `以下简报读取失败：${skipped.join('、')}`,
       fallbackMonth: pick.fallbackMonth,
     }
   }
 
-  async function review(args: any) {
+  // ---------- 复盘运行 ----------
+
+  function pruneRuns(): void {
+    const terminal = [...runs.values()].filter((run) => run.status !== 'running')
+    if (terminal.length <= RUN_HISTORY) return
+    terminal.sort((a, b) => a.startedAt - b.startedAt)
+    for (const run of terminal.slice(0, terminal.length - RUN_HISTORY)) runs.delete(run.id)
+  }
+
+  /**
+   * 完成判据是**产物落盘**，不是「某一轮对话结束了」：DSH 的 prompt 回执不等于
+   * turn 结束，靠 MessageId 关联轮次会在并发工作时串台。所以这里只问一个问题
+   * ——我入队前那两个文件的内容，现在变了吗？
+   */
+  async function refreshRun(cwd: string, run: ReviewRun, now: number): Promise<ReviewRun> {
+    if (run.status !== 'running') return run
+    const json = await readTextOrUndefined(run.jsonPath, cwd)
+    const markdown = await readTextOrUndefined(run.markdownPath, cwd)
+    const jsonChanged = json !== undefined && json !== run.baseline?.json
+    const markdownChanged = markdown !== undefined && markdown !== run.baseline?.markdown
+    if (jsonChanged) {
+      const checked = validateReviewReport(json)
+      run.status = 'done'
+      run.endedAt = now
+      if (checked.ok) {
+        run.report = checked.value
+        run.artifact = 'json'
+      } else {
+        // 契约漂移不致命：能读到 markdown 就回退到它，读不到才只留错误。
+        run.artifact = markdownChanged ? 'markdown' : 'json'
+        run.structuredError = checked.error
+      }
+      return run
+    }
+    if (markdownChanged) {
+      run.status = 'done'
+      run.endedAt = now
+      run.artifact = 'markdown'
+      return run
+    }
+    if (now - run.startedAt > config.runTimeoutMs) {
+      run.status = 'failed'
+      run.endedAt = now
+      run.error = `等待产物超时（${Math.round(config.runTimeoutMs / 1000)} 秒内 ${config.reviewDir}/ 下没有新文件）`
+    }
+    return run
+  }
+
+  async function startReview(args: any, trigger: 'manual' | 'schedule' = 'manual') {
     const sessionId = args?.sessionId
     const cwd = cwdOf(sessionId)
     if (cwd === '' || typeof sessionId !== 'string') return { ok: false, error: '无法确定工作区目录' }
     const agent = agents.get(sessionId)
     if (agent === undefined) return { ok: false, error: '找不到对应 agent（会话可能已结束）' }
-    await ensureDirectories(cwd, sessionId)
+    rememberSession(sessionId)
+    await ensureDirectories(cwd, sessionId, config)
     const date = localDateKey()
-    const prompt = [
-      '【复盘任务】请对 reporter/brief/ 下所有简报做一次整合复盘：',
-      '1. 读取 reporter/brief/ 目录下所有 YYYY-MM-DD.md 文件。',
-      '2. 按「结构化观察」提炼跨项目的踩坑、决策、可复用知识点（每条带发生日期与来源项目）。',
-      '3. 按「周期复盘」聚合：完成了什么、关键收获、下一步、涌现主题、未记录到的成就。',
-      `4. 用 markdown 写成复盘文件，保存到 reporter/Review/${date}.md（目录不存在则创建）。`,
-      '完成后简要说明复盘文件已写入的位置。',
-    ].join('\n')
+    const artifacts = reviewArtifacts(config, date)
+    const run: ReviewRun = {
+      id: `review-${date}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      date,
+      status: 'running',
+      startedAt: Date.now(),
+      skill: config.reviewSkill,
+      dispatch: config.dispatch,
+      markdownPath: artifacts.markdown,
+      jsonPath: artifacts.json,
+    }
     try {
+      run.baseline = {
+        json: await readTextOrUndefined(artifacts.json, cwd),
+        markdown: await readTextOrUndefined(artifacts.markdown, cwd),
+      }
       agent.followup({
-        id: `dsh-report-review-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+        id: run.id,
         role: 'user',
-        content: [{ type: 'text', text: prompt }],
-        source: { kind: 'plugin', plugin: 'dsh-skill-manager' },
+        content: [{ type: 'text', text: buildReviewPrompt({ config, date, dispatch: config.dispatch }) }],
+        source: { kind: 'plugin', plugin: 'dsh-skill-dossier' },
       })
-      return { ok: true, message: `已触发复盘：agent 将读取所有 brief 并写入 reporter/Review/${date}.md` }
+    } catch (error) {
+      run.status = 'failed'
+      run.endedAt = Date.now()
+      run.error = errorMessage(error)
+      runs.set(run.id, run)
+      return { ok: false, runId: run.id, error: `复盘任务入队失败：${run.error}` }
+    }
+    runs.set(run.id, run)
+    pruneRuns()
+    return {
+      ok: true,
+      runId: run.id,
+      trigger,
+      message: `已触发复盘${config.reviewSkill === '' ? '' : `（技能 ${config.reviewSkill}）`}：产物写入 ${artifacts.markdown} 与 ${artifacts.json}`,
+    }
+  }
+
+  async function reviewStatus(args: any) {
+    const sessionId = args?.sessionId
+    const cwd = cwdOf(sessionId)
+    if (cwd === '') return { ok: false, error: '无法确定工作区目录' }
+    const id = typeof args?.runId === 'string' ? args.runId : ''
+    const run = runs.get(id)
+    if (run === undefined) return { ok: true, run: null }
+    const refreshed = await refreshRun(cwd, run, Date.now())
+    return { ok: true, run: publicRun(refreshed) }
+  }
+
+  async function reviewRuns(args: any) {
+    const sessionId = args?.sessionId
+    const cwd = cwdOf(sessionId)
+    if (cwd === '') return { ok: false, error: '无法确定工作区目录' }
+    for (const run of runs.values()) await refreshRun(cwd, run, Date.now())
+    const history = await listReviewArtifacts(cwd)
+    const live = [...runs.values()].sort((a, b) => b.startedAt - a.startedAt).map(publicRun)
+    return { ok: true, runs: live, history }
+  }
+
+  async function cancelReview(args: any) {
+    const id = typeof args?.runId === 'string' ? args.runId : ''
+    const run = runs.get(id)
+    if (run === undefined) return { ok: false, error: '找不到该运行记录' }
+    if (run.status !== 'running') return { ok: false, error: `该运行已结束（${run.status}）` }
+    run.status = 'cancelled'
+    run.endedAt = Date.now()
+    run.error = '已停止跟踪（agent 正在执行的那一轮不会被中断）'
+    return { ok: true }
+  }
+
+  // ---------- brief 回写 ----------
+
+  async function appendBrief(args: any) {
+    const sessionId = args?.sessionId
+    const cwd = cwdOf(sessionId)
+    if (cwd === '' || typeof sessionId !== 'string') return { ok: false, error: '无法确定工作区目录' }
+    const project = typeof args?.project === 'string' ? args.project.trim() : ''
+    if (project === '') return { ok: false, error: '缺少项目名' }
+    const items: BriefItems = {
+      progress: Array.isArray(args?.items?.progress) ? args.items.progress.filter((v: unknown) => typeof v === 'string') : undefined,
+      todo: Array.isArray(args?.items?.todo) ? args.items.todo.filter((v: unknown) => typeof v === 'string') : undefined,
+      issues: Array.isArray(args?.items?.issues) ? args.items.issues.filter((v: unknown) => typeof v === 'string') : undefined,
+    }
+    const date = typeof args?.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(args.date) ? args.date : localDateKey()
+    await ensureDirectories(cwd, sessionId, config)
+    const path = briefPath(date)
+    try {
+      const existing = await readTextOrUndefined(path, cwd)
+      const text = existing ?? `---\ndate: ${date}\n---\n\n# Brief\n`
+      const next = appendBriefItems(text, project, items)
+      if (next === text) return { ok: true, path, appended: 0 }
+      const policy = policyOf(sessionId)
+      await fs.writeText(await fs.resolve(path, { cwd }), next, undefined, undefined, policy)
+      const appended = (items.progress?.length ?? 0) + (items.todo?.length ?? 0) + (items.issues?.length ?? 0)
+      return { ok: true, path, appended }
     } catch (error) {
       return { ok: false, error: errorMessage(error) }
     }
   }
+
+  // ---------- 定时复盘 ----------
+
+  async function scheduledTick(): Promise<void> {
+    if (!config.schedule.enabled) return
+    const now = new Date()
+    if (now.getHours() < config.schedule.hour) return
+    const today = localDateKey()
+    for (const [cwd, sessionId] of lastSessionByCwd) {
+      if (scheduledOn.get(cwd) === today) continue
+      const agent = agents.get(sessionId)
+      if (agent === undefined) continue
+      let daily: any
+      try {
+        daily = await generateDaily({ sessionId })
+      } catch {
+        continue
+      }
+      // 没内容不触发：空转的定时汇报比没有更糟。
+      if (typeof daily?.lastError === 'string' && daily.lastError !== '') continue
+      if (daily?.date !== today || !briefHasProgress(daily.projects ?? [])) continue
+      const already = await listReviewArtifacts(cwd)
+      if (already.some((entry) => entry.date === today)) { scheduledOn.set(cwd, today); continue }
+      const started = await startReview({ sessionId }, 'schedule')
+      if (started.ok === true) scheduledOn.set(cwd, today)
+    }
+  }
+
+  if (deps.interval !== undefined) {
+    const interval = deps.interval
+    ctx.effect(() => interval(() => { void scheduledTick() }, config.schedule.checkMinutes * 60 * 1000))
+  }
+
+  // ---------- 导出 ----------
 
   async function exportReport(args: any) {
     const cwd = cwdOf(args?.sessionId)
     if (cwd === '') return { ok: false, error: '无法确定工作区目录' }
     const sessionId = typeof args?.sessionId === 'string' ? args.sessionId : ''
     if (sessionId === '') return { ok: false, error: '无法确定工作区目录' }
-    await ensureDirectories(cwd, sessionId)
+    await ensureDirectories(cwd, sessionId, config)
     const view: 'daily' | 'monthly' = args?.view === 'monthly' ? 'monthly' : 'daily'
     const data: any = view === 'monthly' ? await generateMonthly(args) : await generateDaily(args)
     if (typeof data.lastError === 'string' && data.lastError !== '') return { ok: false, error: data.lastError }
     const dataKey = view === 'monthly' ? data.month : data.date
     const base = `report-${view}-${dataKey}`
-    const jsonPath = `${DATA_ROOT}/export/${base}.json`
-    const markdownPath = `${DATA_ROOT}/export/${base}.md`
+    const jsonPath = `${config.dataRoot}/${config.exportDir}/${base}.json`
+    const markdownPath = `${config.dataRoot}/${config.exportDir}/${base}.md`
     try {
       const policy = policyOf(args?.sessionId)
       await fs.writeText(await fs.resolve(jsonPath, { cwd }), JSON.stringify(data, null, 2), undefined, undefined, policy)
@@ -320,8 +573,13 @@ export function registerReportApi(ctx: EffectContextLike, deps: ReportDependenci
   const handlers: Record<string, (args: any) => Promise<unknown>> = {
     generateDaily,
     generateMonthly,
-    review,
+    review: (args) => startReview(args, 'manual'),
+    reviewStatus,
+    reviewRuns,
+    cancelReview,
+    appendBrief,
     export: exportReport,
+    reportConfig: async () => ({ ok: true, config }),
   }
 
   const routeHandler = async (req: any, res: any): Promise<void> => {
@@ -339,6 +597,7 @@ export function registerReportApi(ctx: EffectContextLike, deps: ReportDependenci
       if (typeof method !== 'string') { respondJson(res, 400, { error: '缺少 method 字段' }); return }
       const handler = handlers[method]
       if (handler === undefined) { respondJson(res, 404, { error: `未知方法：${method}` }); return }
+      rememberSession(body?.args?.sessionId)
       respondJson(res, 200, await handler(body?.args))
     } catch (error) {
       respondJson(res, 500, { error: errorMessage(error) })
@@ -346,8 +605,4 @@ export function registerReportApi(ctx: EffectContextLike, deps: ReportDependenci
   }
 
   ctx.effect(() => webServer.register({ kind: 'exact', path: '/api/report', handler: routeHandler }))
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
 }

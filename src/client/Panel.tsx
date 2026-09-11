@@ -5,7 +5,7 @@
  * 逻辑在 skill-filter.ts 里，便于脱离 DOM 断言。
  * 组件自包含（按钮 + 弹层），无宿主 hook 依赖。
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from 'react'
 import type { SkillManagerInjected } from './index.ts'
@@ -138,6 +138,7 @@ function usageLine(summary: { count: number; activeDays: number; lastUsedAt: num
 }
 
 export function Panel({ sessionId, prependDraft }: SkillManagerInjected) {
+  const wrapRef = useRef<HTMLDivElement>(null)
   const [open, setOpen] = useState(false)
   const [data, setData] = useState<ListResult | null>(null)
   const [query, setQuery] = useState('')
@@ -280,6 +281,17 @@ export function Panel({ sessionId, prependDraft }: SkillManagerInjected) {
   }
 
   const onKeyDown = (e: ReactKeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+
+  // 退出方式：点面板外任意位置，或再点一次「管理」。不再需要右上角的 ×。
+  useEffect(() => {
+    if (!open) return
+    const onPointerDown = (event: PointerEvent) => {
+      const node = wrapRef.current
+      if (node !== null && !node.contains(event.target as Node)) setOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    return () => document.removeEventListener('pointerdown', onPointerDown)
+  }, [open])
 
   const Btn = ({ label, onClick, kind, title, disabled }: {
     label: string
@@ -731,7 +743,7 @@ export function Panel({ sessionId, prependDraft }: SkillManagerInjected) {
   // ---------- 骨架 ----------
 
   return (
-    <div className={css.wrap}>
+    <div className={css.wrap} ref={wrapRef}>
       <button
         type="button"
         className={`${css.toggle}${open ? ` ${css.toggleActive}` : ''}`}
@@ -752,7 +764,6 @@ export function Panel({ sessionId, prependDraft }: SkillManagerInjected) {
               onChange={(e) => setQuery(e.target.value)}
             />
             {query !== '' ? <Btn label="清除" title="清空搜索" onClick={() => setQuery('')} /> : null}
-            <button type="button" className={css.btn} aria-label="关闭" onClick={() => setOpen(false)}>×</button>
           </div>
           <div className={css.tabs}>
             <button type="button" className={`${css.tab}${tab === 'skills' ? ` ${css.tabActive}` : ''}`} onClick={() => { setTab('skills'); setView('list'); setDetail(null); setNotice('') }}>技能</button>

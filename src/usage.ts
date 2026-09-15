@@ -85,38 +85,6 @@ export function summarizeUsage(usage: Record<string, UsageRecord>, now: number):
     .sort((a, b) => b.count - a.count || b.lastUsedAt - a.lastUsedAt || a.name.localeCompare(b.name))
 }
 
-/**
- * 把调用统计渲染成给模型看的一行一条的紧凑文本。
- * @param usage 按技能名分组的调用统计。
- * @param name 只看某个技能；省略则列出所有被调用过的技能。
- * @param now 当前时间戳（ms）。
- */
-export function formatUsage(usage: Record<string, UsageRecord>, name: string | undefined, now: number): string {
-  const summaries = summarizeUsage(usage, now)
-  if (summaries.length === 0) {
-    return '还没有任何技能调用记录。技能被 skill 工具加载、或用户用 /name 手势调用后会自动记录。'
-  }
-  if (name !== undefined && name !== '') {
-    const summary = summaries.find((s) => s.name === name)
-    if (summary === undefined) return `技能 "${name}" 还没有调用记录。`
-    const rec = usage[name]!
-    const daily = Object.entries(rec.daily)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([d, n]) => `${d}×${n}`)
-    return [
-      `技能 "${name}" 共被调用 ${summary.count} 次：`,
-      `首次 ${dayKey(summary.firstUsedAt)}，最近 ${dayKey(summary.lastUsedAt)}（${summary.lastUsedDaysAgo} 天前）`,
-      `活跃 ${summary.activeDays} 天，平均 ${summary.callsPerDay} 次/天`,
-      `每日分布：${daily.join('、')}`,
-    ].join('\n')
-  }
-  const total = summaries.reduce((acc, s) => acc + s.count, 0)
-  const lines = summaries.map((s, i) => (
-    `${i + 1}. ${s.name} — ${s.count} 次 · 活跃 ${s.activeDays} 天 · 平均 ${s.callsPerDay} 次/天 · 最近 ${dayKey(s.lastUsedAt)}`
-  ))
-  return `共 ${summaries.length} 个技能被调用过（总计 ${total} 次）：\n\n${lines.join('\n')}`
-}
-
 /** 用户消息里的 /name 手势：匹配 `/[a-z0-9-]+`，词边界与工具端一致。 */
 const SKILL_GESTURE = /(^|\s)\/([a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)/g
 

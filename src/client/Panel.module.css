@@ -274,6 +274,14 @@
   color: var(--dsw-alias-button-info-fill, #4176e6);
 }
 
+/* 告警徽标：同名副本内容已分叉——改了不生效的那一份，是真会浪费时间的问题。
+   颜色用原生中性底 + 文字色，不新造调色板（本文件其余部分同样只读 --dsw-*）。 */
+.badgeWarn {
+  border-color: var(--dsw-alias-label-tertiary, #81858c);
+  color: var(--dsw-alias-label-primary, #0f1115);
+  background: var(--dsw-alias-interactive-bg-hover-solid, #f1f3f5);
+}
+
 /* ---------- 提示与错误 ---------- */
 
 .hint {
@@ -611,3 +619,10 @@
     transition: none;
   }
 }
+
+/* 一个管理入口；用量需要更宽的绘图区。 */
+.panel { position: fixed; top: 8vh; right: 2vw; width: min(620px, 96vw); max-height: 84vh; padding: 16px; }
+.usagePanel { width: min(1200px, 96vw); }
+.header > strong { flex: 1; }
+.toggle > svg { width: 16px; height: 16px; }
+@media (max-width: 600px) { .panel { top: 2vh; max-height: 96vh; padding: 12px; } .tabs { flex-shrink: 0; } }

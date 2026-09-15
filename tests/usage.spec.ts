@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatUsage, recordUsage, skillGestures, summarizeUsage, RECENT_CAP, type UsageRecord } from '../src/usage.ts'
+import { recordUsage, skillGestures, summarizeUsage, RECENT_CAP, type UsageRecord } from '../src/usage.ts'
 
 /** 本地时区中午，避免跨日边界：dayKey 稳定为对应日期。 */
 function ts(year: number, month: number, day: number, hour = 12): number {
@@ -41,31 +41,6 @@ describe('summarizeUsage', () => {
     expect(summaries[0]?.activeDays).toBe(2)
     expect(summaries[0]?.callsPerDay).toBe(1)
     expect(summaries[0]?.lastUsedDaysAgo).toBe(1)
-  })
-})
-
-describe('formatUsage', () => {
-  it('reports empty explicitly', () => {
-    expect(formatUsage({}, undefined, ts(2026, 8, 24))).toContain('还没有')
-  })
-
-  it('reports a single skill detail', () => {
-    const usage: Record<string, UsageRecord> = {}
-    recordUsage(usage, 'research', ts(2026, 8, 22))
-    const text = formatUsage(usage, 'research', ts(2026, 8, 24))
-    expect(text).toContain('research')
-    expect(text).toContain('共被调用 1 次')
-    expect(text).toContain('2026-08-22')
-  })
-
-  it('lists all skills with a total', () => {
-    const usage: Record<string, UsageRecord> = {}
-    recordUsage(usage, 'a', ts(2026, 8, 22))
-    recordUsage(usage, 'b', ts(2026, 8, 23))
-    const text = formatUsage(usage, undefined, ts(2026, 8, 24))
-    expect(text).toContain('总计 2 次')
-    expect(text).toContain('a —')
-    expect(text).toContain('b —')
   })
 })
 

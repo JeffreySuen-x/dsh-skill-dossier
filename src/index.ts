@@ -16,6 +16,7 @@
  */
 import { realpath } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
+import { homedir } from 'node:os'
 import { isAbsolute, join, relative, resolve as resolvePath } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { DIRECTION_LABELS, isDirectionLabel } from './directions.ts'
@@ -25,6 +26,7 @@ import { atomicReplaceCommand, fsEntryOf, isWithin, mkdirCommand, moveNoClobberC
 import { createRpcRoute } from './http.ts'
 import { createIndexStore } from './index-store.ts'
 import { estimateSkillTokens } from './tokens.ts'
+import { defaultSkillRoots, scanSkillRoots, type ScanDirEntry } from './scanner.ts'
 import { normalizeReportConfig, registerReportApi, type ReportAgentsLike, type ReportFsLike, type ReportWebServerLike } from './report.ts'
 
 /** 与 base bundle 选择 bash/pwsh 的分支一致（process.platform === 'win32'）。 */
@@ -86,7 +88,9 @@ interface AgentsLike {
 interface FsLike {
   resolve(path: string, opts?: { cwd?: string }): Promise<unknown>
   readText(target: unknown): Promise<string>
-  listDir(target: unknown): Promise<Array<{ name?: string; path?: string }>>
+  listDir(target: unknown): Promise<ScanDirEntry[]>
+  /** 与 @deepseek-ai/dsh-fs 的 stat(target, signal) 对齐；缺失返回 undefined。 */
+  stat(target: unknown): Promise<{ type: string; size?: number } | undefined>
   /** 与 @deepseek-ai/dsh-fs 的 writeText(target, content, expected, signal, sandboxPolicy) 对齐。 */
   writeText(target: unknown, content: string, expected?: unknown, signal?: unknown, policy?: unknown): Promise<unknown>
 }
@@ -533,15 +537,89 @@ export function apply(ctx: Context, config?: Config): void {
 
   // ---------- HTTP RPC（浏览器半调用） ----------
 
+  /**
+   * 技能根扫描的短缓存。
+   *
+   * 为什么需要：注册表**只返回赢家**（`dsh-skill` README 写明「没有 API 可检查
+   * 全部被遮蔽的定义」），要看见被遮蔽者只能自己扫盘。但面板每次打开都会调
+   * `list`，而全量扫描要遍历 100+ 个 bundle、统计 11 MB 资源——实测一次约
+   * 数百毫秒。所以给一个 3 秒的短缓存：面板连续刷新不重复扫，人在面板上做完
+   * 一次停用/删除后再打开时（>3 秒）自然拿到新盘面。
+   *
+   * `ponytail:` 天花板——TTL 而非 watcher。磁盘在 3 秒内被外部改动会显示旧值；
+   * 真要实时，接 `fs/observed` 或 chokidar 去 invalidate，别把 TTL 调小。
+   */
+  const SCAN_TTL_MS = 3000
+  let scanCache: { at: number; projectRoot: string; result: Awaited<ReturnType<typeof scanSkillRoots>> } | undefined
+
+  /** 项目根判定与宿主一致：最近的含 `.git` 的祖先，找不到就用 cwd。 */
+  async function projectRootOf(cwd: string): Promise<string> {
+    let current = resolvePath(cwd)
+    for (let depth = 0; depth < 64; depth += 1) {
+      try {
+        await fs!.listDir(await fs!.resolve(join(current, '.git'), { cwd }))
+        return current
+      } catch { /* 没有 .git 就继续往上 */ }
+      const parent = resolvePath(join(current, '..'))
+      if (parent === current) break
+      current = parent
+    }
+    return resolvePath(cwd)
+  }
+
+  async function scan(cwd: string): Promise<Awaited<ReturnType<typeof scanSkillRoots>>> {
+    const projectRoot = await projectRootOf(cwd)
+    const cached = scanCache
+    if (cached !== undefined && cached.projectRoot === projectRoot && Date.now() - cached.at < SCAN_TTL_MS) {
+      return cached.result
+    }
+    const dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+    const agentsHome = process.env.DSH_AGENTS_HOME ?? join(homedir(), '.agents')
+    const roots = defaultSkillRoots({ projectRoot, dshHome, agentsHome })
+    const result = await scanSkillRoots(
+      {
+        resolve: (path) => fs!.resolve(path, { cwd }) as Promise<{ targetKey: string }>,
+        readText: (target) => fs!.readText(target),
+        listDir: (target) => fs!.listDir(target) as Promise<ScanDirEntry[]>,
+        // stat 的返回形状与 dsh-fs 的 { version, type, size } 对齐，多出的 version 无害。
+        stat: (target) => fs!.stat(target) as Promise<{ type: string; size?: number } | undefined>,
+      },
+      roots,
+      { hash: (text) => createHash('sha256').update(text).digest('hex').slice(0, 16) },
+    )
+    scanCache = { at: Date.now(), projectRoot, result }
+    return result
+  }
+
+  /** 扫描失败不该让整个面板空白：退化成「没有扫描结果」，并如实带出原因。 */
+  async function scanOrNull(cwd: string | undefined): Promise<{ scan: Awaited<ReturnType<typeof scanSkillRoots>> | null; error: string | null }> {
+    if (cwd === undefined) return { scan: null, error: null }
+    try {
+      return { scan: await scan(cwd), error: null }
+    } catch (error) {
+      const message = errorMessage(error)
+      logger?.warn?.(`skill-manager: 技能根扫描失败（面板退化为只看注册表）：${message}`)
+      return { scan: null, error: message }
+    }
+  }
+
   const handlers: Record<string, (args: any) => Promise<unknown>> = {
     async list(args) {
       const sessionId = args?.sessionId
+      const cwd = cwdOf(sessionId)
       const summaries = await skills.list(viewOptions(sessionId))
-      const index = await readIndex(cwdOf(sessionId))
+      const index = await readIndex(cwd)
+      const { scan: scanned, error: scanError } = await scanOrNull(cwd)
+      const byName = new Map((scanned?.skills ?? []).map((entry) => [entry.name, entry]))
+      const copiesOf = new Map((scanned?.summary.conflicts ?? []).map((conflict) => [conflict.name, conflict]))
       let catalogTokens = 0
       const entries = summaries.map((s) => {
-        const approxTokens = estimateSkillTokens(s.name, s.description, typeof s.whenToUse === 'string' ? s.whenToUse : '')
+        // 口径对齐宿主：目录里只有 name + 截断后的 description，`whenToUse` 不进目录
+        // （`dsh-tool-skill/lib/index.js` 的 catalogDescription()）。
+        const approxTokens = estimateSkillTokens(s.name, s.description)
         catalogTokens += approxTokens
+        const local = byName.get(s.name)
+        const conflict = copiesOf.get(s.name)
         return {
           name: s.name,
           description: s.description,
@@ -551,9 +629,31 @@ export function apply(ctx: Context, config?: Config): void {
           source: s.source,
           provider: s.provider,
           approxTokens,
+          /** 磁盘事实（来自自扫；注册表查不到时为 null）。 */
+          rank: local?.rank ?? null,
+          dirName: local?.dirName ?? null,
+          bodyBytes: local?.bodyBytes ?? null,
+          bodyTokens: local?.bodyTokens ?? null,
+          assetBytes: local?.assetBytes ?? null,
+          assetFiles: local?.assetFiles ?? null,
+          /** 同名副本数（本 root 之外的被遮蔽者）；0 = 没有冲突。 */
+          shadowed: conflict === undefined ? 0 : conflict.copies.length - 1,
+          conflictIdentical: conflict?.identical ?? null,
         }
       })
-      return { skills: entries, index, usageHealth: usageWriteFailure, catalogTokens }
+      const activeNames = new Set(entries.map((entry) => entry.name))
+      // 幽灵档：档案里有、当前注册表里没有——模型被指派去用一个加载不出来的技能。
+      const ghosts = Object.keys(index.skills).filter((name) => !activeNames.has(name)).sort()
+      return {
+        skills: entries,
+        index,
+        usageHealth: usageWriteFailure,
+        catalogTokens,
+        scan: scanned?.summary ?? null,
+        scanError,
+        ghosts,
+        shadowedCount: (scanned?.summary.conflicts ?? []).filter((conflict) => conflict.copies.length > 1).length,
+      }
     },
 
     async get(args) {
@@ -561,8 +661,12 @@ export function apply(ctx: Context, config?: Config): void {
       const sessionId = typeof args.sessionId === 'string' ? args.sessionId : undefined
       const skill = await skills.get(args.name, viewOptions(sessionId))
       if (skill === undefined) return null
-      const index = await readIndex(cwdOf(sessionId))
+      const cwd = cwdOf(sessionId)
+      const index = await readIndex(cwd)
       const profile = Object.prototype.hasOwnProperty.call(index.skills, skill.name) ? index.skills[skill.name] : null
+      const { scan: scanned } = await scanOrNull(cwd)
+      const local = scanned?.skills.find((entry) => entry.name === skill.name) ?? null
+      const conflict = scanned?.summary.conflicts.find((item) => item.name === skill.name) ?? null
       return {
         name: skill.name,
         description: skill.description,
@@ -574,6 +678,30 @@ export function apply(ctx: Context, config?: Config): void {
         modelInvocable: skill.invocation.modelInvocable === true,
         userInvocable: skill.invocation.userInvocable === true,
         profile,
+        /** 磁盘事实与同名副本（来自自扫；注册表给不出被遮蔽者）。 */
+        facts: local === null
+          ? null
+          : {
+              rank: local.rank,
+              root: local.root,
+              dirName: local.dirName,
+              bodyBytes: local.bodyBytes,
+              bodyTokens: local.bodyTokens,
+              catalogTokens: local.catalogTokens,
+              assetBytes: local.assetBytes,
+              assetFiles: local.assetFiles,
+              descriptionLength: local.description.replace(/\s+/g, ' ').trim().length,
+            },
+        copies: conflict === null
+          ? []
+          : conflict.copies.map((copy) => ({
+              source: copy.source,
+              rank: copy.rank,
+              skillPath: copy.skillPath,
+              hash: copy.hash,
+              bodyBytes: copy.bodyBytes,
+              winner: copy === conflict.copies[0],
+            })),
       }
     },
 
@@ -610,6 +738,40 @@ export function apply(ctx: Context, config?: Config): void {
       return { ok: true }
     },
 
+    /**
+     * 同名冲突的完整盘面（含被遮蔽者）。
+     *
+     * 注册表永远给不出这个：落败者只留一行 logger.warn。这里返回每一组的全部
+     * 副本、各自来自哪个根、内容是否一致——`identical === false` 的组是**会让人
+     * 改错文件**的那批（改了 rank 400 那份以为生效，其实 rank 100 的赢）。
+     */
+    async conflicts(args) {
+      const sessionId = typeof args?.sessionId === 'string' ? args.sessionId : undefined
+      const cwd = cwdOf(sessionId)
+      const { scan: scanned, error } = await scanOrNull(cwd)
+      if (scanned === null) {
+        return { ok: false, error: error ?? '无法确定当前工作目录' }
+      }
+      return {
+        ok: true,
+        summary: scanned.summary,
+        conflicts: scanned.summary.conflicts.map((conflict) => ({
+          name: conflict.name,
+          identical: conflict.identical,
+          copies: conflict.copies.map((copy) => ({
+            source: copy.source,
+            rank: copy.rank,
+            root: copy.root,
+            dirName: copy.dirName,
+            skillPath: copy.skillPath,
+            hash: copy.hash,
+            bodyBytes: copy.bodyBytes,
+            sameName: copy.dirName === copy.name,
+          })),
+        })),
+      }
+    },
+
     async uninstall(args) {
       if (args === null || typeof args !== 'object' || typeof args.name !== 'string') return { ok: false, error: '参数无效' }
       const name = args.name
@@ -617,7 +779,7 @@ export function apply(ctx: Context, config?: Config): void {
       const skill = await skills.get(name, viewOptions(sessionId))
       if (skill === undefined) return { ok: false, error: `技能 "${name}" 不存在` }
       const entryInfo = fsEntryOf(skill)
-      if (entryInfo === undefined) return { ok: false, error: '该技能不是文件系统技能，无法停用' }
+      if (entryInfo === undefined) return { ok: false, error: '该技能没有文件路径（不是文件系统技能），无法停用' }
       const cwd = cwdOf(sessionId)
       if (cwd === undefined) return { ok: false, error: '无法确定当前工作目录' }
       const trashDir = trashDirOf(entryInfo.root)

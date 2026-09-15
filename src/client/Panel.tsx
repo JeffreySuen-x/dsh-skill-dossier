@@ -16,6 +16,7 @@ import type { UsageRecord } from '../usage.ts'
 import css from './Panel.module.css'
 import { reportFailureMessage } from './report-state.ts'
 import { ALL_FILTER, UNPROFILED_FILTER, skillFilterChips, skillMatchesFilter } from './skill-filter.ts'
+import { Menu, Modal, IconEllipsisOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 
 const FS_SOURCES = ['project-dsh', 'project-agents', 'user-dsh', 'user-agents', 'custom']
 type Origin = 'self' | 'external' | 'system' | 'unknown'
@@ -31,8 +32,19 @@ interface Summary {
   userInvocable: boolean
   source: string
   provider: string
-  /** 目录成本估算（name+description+whenToUse 进系统提示的 ≈token 数）。 */
+  /** 目录成本估算（name + 截断后 description 进系统提示的 ≈token 数，宿主口径）。 */
   approxTokens?: number
+  /** 自扫磁盘事实；注册表里查不到磁盘条目时为 null。 */
+  rank?: number | null
+  dirName?: string | null
+  bodyBytes?: number | null
+  bodyTokens?: number | null
+  assetBytes?: number | null
+  assetFiles?: number | null
+  /** 被遮蔽的同名副本数；0 = 无冲突。 */
+  shadowed?: number
+  /** 同名副本内容是否一致；null = 无冲突。 */
+  conflictIdentical?: boolean | null
 }
 interface Profile extends IndexEntry {}
 interface Detail extends Summary {
@@ -48,10 +60,27 @@ type IndexData = {
 interface ListResult {
   skills: Summary[]
   index: IndexData
-  /** 全部可见技能的目录成本合计（≈token）。 */
+  /** 全部可见技能的目录成本合计（≈token，宿主口径）。 */
   catalogTokens?: number
   /** 非 null 表示调用统计写盘连续失败，面板据此提示「统计不可用」而不是显示空表。 */
   usageHealth?: string | null
+  /** 自扫摘要（成本三层 + 冲突数）；扫描失败时为 null。 */
+  scan?: ScanSummary | null
+  /** 非 null 表示技能根扫描失败，面板退化为只看注册表。 */
+  scanError?: string | null
+  /** 档案里有、当前注册表里没有的技能名——模型被指派去用一个加载不出来的技能。 */
+  ghosts?: string[]
+}
+/** 自扫摘要（与 host 的 `src/scanner.ts` 同形，只取面板用得到的字段）。 */
+interface ScanSummary {
+  entries: number
+  winners: number
+  catalogTokens: number
+  bodyTokens: number
+  assetBytes: number
+  truncatedDescriptions: string[]
+  nameMismatches: string[]
+  conflicts: Array<{ name: string; identical: boolean }>
 }
 interface ReportProject {
   name: string
@@ -116,7 +145,7 @@ const MANAGER_API = '/api/skill-manager'
 const REPORT_API = '/api/report'
 
 function normalizeList(res: unknown): ListResult {
-  const r = (res ?? {}) as { skills?: unknown; index?: unknown; usageHealth?: unknown; catalogTokens?: unknown }
+  const r = (res ?? {}) as { skills?: unknown; index?: unknown; usageHealth?: unknown; catalogTokens?: unknown; scan?: unknown; scanError?: unknown; ghosts?: unknown }
   const idx = (r.index ?? {}) as { skills?: unknown; trash?: unknown; usage?: unknown }
   return {
     skills: Array.isArray(r.skills) ? r.skills as Summary[] : [],
@@ -127,6 +156,9 @@ function normalizeList(res: unknown): ListResult {
     },
     usageHealth: typeof r.usageHealth === 'string' ? r.usageHealth : null,
     catalogTokens: typeof r.catalogTokens === 'number' ? r.catalogTokens : 0,
+    scan: r.scan !== null && typeof r.scan === 'object' ? r.scan as ScanSummary : null,
+    scanError: typeof r.scanError === 'string' ? r.scanError : null,
+    ghosts: Array.isArray(r.ghosts) ? r.ghosts as string[] : [],
   }
 }
 
@@ -137,12 +169,12 @@ function usageLine(summary: { count: number; activeDays: number; lastUsedAt: num
   return `调用记录：${summary.count} 次 · 活跃 ${summary.activeDays} 天 · 最近 ${dayKey(summary.lastUsedAt)}（${when}）`
 }
 
-export function Panel({ sessionId, prependDraft }: SkillManagerInjected) {
+export function Panel({ sessionId, prependDraft, renderSlot }: SkillManagerInjected) {
   const wrapRef = useRef<HTMLDivElement>(null)
   const [open, setOpen] = useState(false)
   const [data, setData] = useState<ListResult | null>(null)
   const [query, setQuery] = useState('')
-  const [tab, setTab] = useState<'skills' | 'archive' | 'report'>('skills')
+  const [tab, setTab] = useState<'skills' | 'archive' | 'report' | 'usage'>('skills')
   const [view, setView] = useState<'list' | 'detail' | 'create'>('list')
   const [detail, setDetail] = useState<Detail | null>(null)
   const [filter, setFilter] = useState('all')
@@ -155,6 +187,39 @@ export function Panel({ sessionId, prependDraft }: SkillManagerInjected) {
   const [reportData, setReportData] = useState<ReportData | null>(null)
   const [reportLoading, setReportLoading] = useState(false)
   const [reportError, setReportError] = useState('')
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [downloadStatus, setDownloadStatus] = useState('')
+  const [downloadDialogOpen, setDownloadDialogOpen] = useState(false)
+  const [downloading, setDownloading] = useState(false)
+  const menuButton = useRef<HTMLButtonElement>(null)
+  const abortDownload = useRef<AbortController | null>(null)
+  useEffect(() => () => { abortDownload.current?.abort() }, [])
+  const closePanel = () => { setOpen(false); menuButton.current?.focus() }
+  const download = async () => {
+    if (downloading) return
+    const controller = new AbortController()
+    abortDownload.current = controller
+    setDownloading(true)
+    setDownloadDialogOpen(true)
+    setDownloadStatus('正在准备 Session 日志…')
+    try {
+      const url = new URL('/api/session.export', window.location.origin === 'null' ? 'http://dsh.internal' : window.location.origin)
+      url.searchParams.set('sessionId', sessionId)
+      url.searchParams.set('includeDescendants', 'true')
+      const response = await fetch(url, { method: 'HEAD', signal: controller.signal })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      if (controller.signal.aborted) return
+      const link = document.createElement('a')
+      link.href = url.href
+      link.download = `session-${sessionId.replace(/[^a-zA-Z0-9_-]/g, '_')}.zip`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      setDownloadStatus('已交给浏览器下载。')
+    } catch (error) {
+      if (!controller.signal.aborted) setDownloadStatus(`下载失败：${String(error)}`)
+    } finally { if (!controller.signal.aborted) setDownloading(false) }
+  }
 
   const reload = () => {
     setData(null)
@@ -187,6 +252,15 @@ export function Panel({ sessionId, prependDraft }: SkillManagerInjected) {
   const usageHealth = data?.usageHealth ?? null
   const catalogTokens = data?.catalogTokens ?? 0
   const skills = data?.skills ?? null
+  const scan = data?.scan ?? null
+  const scanError = data?.scanError ?? null
+  const ghosts = data?.ghosts ?? []
+  /** 成本长尾：正文最大的那个技能，用来给「谁最占上下文」一个具体的名字。 */
+  const heaviest = skills === null
+    ? null
+    : skills.reduce<Summary | null>((worst, current) => (
+      (current.bodyTokens ?? 0) > (worst?.bodyTokens ?? 0) ? current : worst
+    ), null)
   const tokensByName = new Map((skills ?? []).map((s) => [s.name, s.approxTokens ?? 0]))
   const sourceByName = new Map((skills ?? []).map((s) => [s.name, s.source]))
   const activeNames = skills === null ? null : new Set(skills.map((s) => s.name))
@@ -280,7 +354,7 @@ export function Panel({ sessionId, prependDraft }: SkillManagerInjected) {
       .catch((error: unknown) => { setDetail(null); setNotice(String(error)) })
   }
 
-  const onKeyDown = (e: ReactKeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+  const onKeyDown = (e: ReactKeyboardEvent) => { if (e.key === 'Escape') closePanel() }
 
   // 退出方式：点面板外任意位置，或再点一次「管理」。不再需要右上角的 ×。
   useEffect(() => {
@@ -330,6 +404,7 @@ export function Panel({ sessionId, prependDraft }: SkillManagerInjected) {
     const profiled = isProfiled(s.name)
     const fsSkill = FS_SOURCES.includes(s.source)
     const origin = originOf(s)
+    const shadowed = s.shadowed ?? 0
     return (
       <div key={s.name} className={css.row} onClick={() => openDetail(s.name)}>
         <div className={css.rowMain}>
@@ -340,6 +415,14 @@ export function Panel({ sessionId, prependDraft }: SkillManagerInjected) {
               ? <span className={`${css.badge} ${css.badgeOk}`}>{profiles[s.name]?.direction}</span>
               : <span className={css.badge}>未建档</span>}
             {s.userInvocable ? null : <span className={css.badge}>禁用户调用</span>}
+            {shadowed === 0
+              ? null
+              : s.conflictIdentical === false
+                ? <span className={`${css.badge} ${css.badgeWarn}`} title="同名副本内容存在差异；此处显示当前生效的技能">冲突 ×{shadowed + 1}</span>
+                : <span className={css.badge} title="同名副本内容一致，只是冗余">副本 ×{shadowed + 1}</span>}
+            {s.bodyTokens !== null && s.bodyTokens !== undefined && s.bodyTokens >= 8000
+              ? <span className={css.badge} title="加载一次就要这么多 token">重 {Math.round(s.bodyTokens / 1000)}k</span>
+              : null}
           </div>
           <div className={css.rowDesc}>{s.description}</div>
         </div>
@@ -379,7 +462,28 @@ export function Panel({ sessionId, prependDraft }: SkillManagerInjected) {
           : filtered !== null && filtered.length === 0
             ? <div className={css.hint}>{skills.length === 0 ? '当前没有可用技能' : '没有匹配的技能'}</div>
             : <div className={css.list}>{(filtered ?? []).map(row)}</div>}
+        {tab === 'skills' ? costLine() : null}
       </>
+    )
+  }
+
+  /**
+   * 成本三层一行说完。
+   *
+   * 为什么值得占这一行：常驻目录（≈5.4k / 88 个技能）根本不是瓶颈，
+   * 正文（≈261k）与资源（11 MB）才是，而且极度长尾——不写出来，
+   * 人只会盯着最小的那层优化。
+   */
+  const costLine = () => {
+    if (scan === null) return null
+    const mb = scan.assetBytes / 1e6
+    return (
+      <div className={css.hint}>
+        成本三层：常驻目录 ≈{scan.catalogTokens} tok（{scan.winners} 个技能，仅 name+描述）
+        · 正文加载一次 ≈{Math.round(scan.bodyTokens / 1000)}k tok{heaviest?.bodyTokens ? `（最大 ${heaviest.name} ≈${Math.round(heaviest.bodyTokens / 1000)}k）` : ''}
+        · 资源包 {mb >= 1 ? `${mb.toFixed(1)} MB` : `${Math.round(scan.assetBytes / 1024)} KB`}
+        {ghosts.length > 0 ? ` · 幽灵档 ${ghosts.length} 条（档案里有、注册表里没有：${ghosts.slice(0, 3).join('、')}${ghosts.length > 3 ? '…' : ''}）` : ''}
+      </div>
     )
   }
 
@@ -744,17 +848,15 @@ export function Panel({ sessionId, prependDraft }: SkillManagerInjected) {
 
   return (
     <div className={css.wrap} ref={wrapRef}>
-      <button
-        type="button"
-        className={`${css.toggle}${open ? ` ${css.toggleActive}` : ''}`}
-        title="技能目录 / 档案 / 汇报"
-        onClick={() => setOpen(!open)}
-      >
-        管理
-      </button>
+      <Menu open={menuOpen} align="end" dense onClose={() => setMenuOpen(false)}
+        items={[{ id: 'download', label: '下载 Session 日志', disabled: downloading }, { id: 'manage', label: '管理' }]}
+        onSelect={(id) => { setMenuOpen(false); if (id === 'manage') setOpen(true); else void download() }}
+        anchor={<button ref={menuButton} type="button" className={css.toggle} aria-label="更多操作" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen(!menuOpen)}><IconEllipsisOutline16 /></button>} />
+      <Modal open={downloadDialogOpen} onClose={() => setDownloadDialogOpen(false)} title="下载 Session 日志" description={downloadStatus} closeLabel="关闭" />
       {open ? (
-        <div className={css.panel} onKeyDown={onKeyDown}>
-          <div className={css.header}>
+        <div className={`${css.panel}${tab === 'usage' ? ` ${css.usagePanel}` : ''}`} onKeyDown={onKeyDown} role="dialog" aria-label="管理">
+          <div className={css.header}><strong>管理</strong><button type="button" className={css.btn} onClick={closePanel}>关闭</button></div>
+          {tab !== 'usage' ? <div className={css.header}>
             <input
               className={css.search}
               type="text"
@@ -764,21 +866,25 @@ export function Panel({ sessionId, prependDraft }: SkillManagerInjected) {
               onChange={(e) => setQuery(e.target.value)}
             />
             {query !== '' ? <Btn label="清除" title="清空搜索" onClick={() => setQuery('')} /> : null}
-          </div>
+          </div> : null}
           <div className={css.tabs}>
             <button type="button" className={`${css.tab}${tab === 'skills' ? ` ${css.tabActive}` : ''}`} onClick={() => { setTab('skills'); setView('list'); setDetail(null); setNotice('') }}>技能</button>
             <button type="button" className={`${css.tab}${tab === 'archive' ? ` ${css.tabActive}` : ''}`} onClick={() => { setTab('archive'); setNotice('') }}>档案</button>
             <button type="button" className={`${css.tab}${tab === 'report' ? ` ${css.tabActive}` : ''}`} onClick={() => { setTab('report'); setNotice(''); if (reportData === null && !reportLoading) loadReport() }}>汇报</button>
+            <button type="button" className={`${css.tab}${tab === 'usage' ? ` ${css.tabActive}` : ''}`} onClick={() => { setTab('usage'); setNotice('') }}>用量</button>
           </div>
           {notice !== '' ? <div className={css.notice}>{notice}</div> : null}
-          {usageHealth !== null
+          {tab !== 'usage' && usageHealth !== null
             ? <div className={css.notice}>调用统计写盘失败（技能本身不受影响）：{usageHealth}</div>
             : null}
-          {tab === 'archive'
+          {tab !== 'usage' && scanError !== null
+            ? <div className={css.notice}>技能根扫描失败，本页只看注册表（被遮蔽的同名副本看不到）：{scanError}</div>
+            : null}
+          {tab === 'usage' ? renderSlot('skill-manager.usage', {}, { fallback: <p>用量插件未加载，请启用 dsh-token-dashboard 后重新打开。</p> }) : tab === 'archive'
             ? archiveBody()
-            : tab === 'report'
-              ? reportBody()
-              : view === 'list' ? listBody() : detailBody()}
+              : tab === 'report'
+                ? reportBody()
+                : view === 'list' ? listBody() : detailBody()}
         </div>
       ) : null}
     </div>

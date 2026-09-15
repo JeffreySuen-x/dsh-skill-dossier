@@ -17,6 +17,20 @@ describe('Windows 路径解析（path.win32）', () => {
     })
   })
 
+  // 回归：目录名是源仓库的目录名，frontmatter `name` 才是调用名，两者不必然相等。
+  // 早期版本要求两者相等，导致 `book-to-skill-master/SKILL.md`（name=book-to-skill）
+  // 这类技能被判成「不是文件系统技能」，停用/删除全部失效。
+  it('fsEntryOf 接受目录名与技能名不一致的 bundle', () => {
+    expect(fsEntryOf({ name: 'book-to-skill', path: 'C:\\Users\\demo\\.dsh\\skills\\book-to-skill-master\\SKILL.md' }, win32)).toEqual({
+      entry: 'C:\\Users\\demo\\.dsh\\skills\\book-to-skill-master',
+      root: 'C:\\Users\\demo\\.dsh\\skills',
+    })
+  })
+
+  it('fsEntryOf 拒绝与技能名不同的平铺 .md（避免误移无关文件）', () => {
+    expect(fsEntryOf({ name: 'research', path: 'C:\\Users\\demo\\.dsh\\skills\\other.md' }, win32)).toBeUndefined()
+  })
+
   it('trashDirOf 生成与技能根同级的 trash 目录', () => {
     expect(trashDirOf('C:\\Users\\demo\\.dsh\\skills', win32)).toBe('C:\\Users\\demo\\.dsh\\skill-manager\\trash')
   })

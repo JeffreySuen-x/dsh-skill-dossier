@@ -3,7 +3,10 @@ import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { Readable } from 'node:stream'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { SlotCore } from '@deepseek-ai/dsh-client-ui-slots'
+import { apply as applyClient } from '../src/client/index.ts'
+vi.mock('../src/client/Panel.tsx', () => ({ Panel: () => null }))
 import { apply, inject } from '../src/index.ts'
 
 interface Route {
@@ -592,7 +595,7 @@ describe('single-package host activation', () => {
       args: { sessionId: 'session-1', name: 'alpha' },
     })
 
-    expect(response.body).toEqual({ ok: false, error: '该技能不是文件系统技能，无法停用' })
+    expect(response.body).toEqual({ ok: false, error: '该技能没有文件路径（不是文件系统技能），无法停用' })
   })
 
   it('moves an uninstalled skill back when the index commit fails', async () => {
@@ -791,3 +794,28 @@ describe('single-package host activation', () => {
   })
 })
 
+
+
+it('管理替换更多菜单的同一槽位，声明用量子槽；卸载后官方菜单恢复', () => {
+  const core = new SlotCore()
+  core.register({ name: 'root', children: { 'conversation.session.header.utilities': { kind: 'list', scope: 'session' } } } as any, (() => null) as any)
+  const original = () => null
+  core.register({ name: 'conversation.session.header.utilities', id: 'session-log-download' }, original)
+  let dispose = () => {}
+  let draft = '已有意图'
+  applyClient({
+    slots: { inject: (_: string, fn: () => () => void) => { dispose = fn() }, register: core.register.bind(core) },
+    sessions: { scope: () => ({}) },
+    conversation: { input: { for: () => ({ state: { getSnapshot: () => ({ draft }) }, setDraft: (value: string) => { draft = value } }) } },
+  } as any)
+  const winners = core.entriesOfSlot('conversation.session.header.utilities')
+  expect(winners).toHaveLength(1)
+  expect(winners[0]?.component).not.toBe(original)
+  expect(core.spec('skill-manager.usage')).toEqual({ kind: 'single', scope: 'session' })
+  const injected = (winners[0]!.inject as any)('session-one')
+  injected.prependDraft('/skill ')
+  expect(draft).toBe('/skill 已有意图')
+  dispose()
+  expect(core.entriesOfSlot('conversation.session.header.utilities')[0]?.component).toBe(original)
+  expect(core.spec('skill-manager.usage')).toBeUndefined()
+})

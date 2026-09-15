@@ -46,13 +46,6 @@ export interface UsageSummary {
  */
 export declare function summarizeUsage(usage: Record<string, UsageRecord>, now: number): UsageSummary[];
 /**
- * 把调用统计渲染成给模型看的一行一条的紧凑文本。
- * @param usage 按技能名分组的调用统计。
- * @param name 只看某个技能；省略则列出所有被调用过的技能。
- * @param now 当前时间戳（ms）。
- */
-export declare function formatUsage(usage: Record<string, UsageRecord>, name: string | undefined, now: number): string;
-/**
  * 从一段用户文本里提取 /name 手势命中的技能名（去重、保序）。
  * @param text 用户输入的纯文本。
  */

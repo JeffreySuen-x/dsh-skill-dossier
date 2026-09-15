@@ -29,15 +29,24 @@ export function isWithin(candidate: string, dir: string, p: PathFns = defaultPat
 
 interface MovableSkill { name: string; path?: string }
 
-/** 从注册表定义解析可移动的文件系统条目（只信任注册表给的路径）。 */
+/**
+ * 从注册表定义解析可移动的文件系统条目（只信任注册表给的路径）。
+ *
+ * 判据是**路径形状**，不是「目录名等于技能名」：只要注册表给的 `path` 是
+ * `<root>/<dir>/SKILL.md` 或 `<root>/<name>.md`，root 就由路径反推。
+ * 早期版本额外要求 `basename(dirname(path)) === skill.name`，于是目录名与
+ * frontmatter `name` 不一致的技能（本机实测 4 个：`book-to-skill-master`、
+ * `god-skill-main` 等）会被误判成「不是文件系统技能」，生命周期操作全废。
+ * 目录名是源仓库的目录名，frontmatter `name` 才是调用名——两者不必然相等。
+ */
 export function fsEntryOf(skill: MovableSkill, p: PathFns = defaultPath): { entry: string; root: string } | undefined {
   if (typeof skill.path !== 'string') return undefined
   const base = p.basename(skill.path)
   if (base === 'SKILL.md') {
     const dir = p.dirname(skill.path)
-    if (p.basename(dir) !== skill.name) return undefined
     return { entry: dir, root: p.dirname(dir) }
   }
+  // 平铺技能：<root>/<name>.md。只认与技能同名的单文件，避免把任意 .md 当技能。
   if (base === `${skill.name}.md`) {
     return { entry: skill.path, root: p.dirname(skill.path) }
   }

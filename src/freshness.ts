@@ -80,5 +80,5 @@ export function formatReview(entries: ReviewEntry[], total: number): string {
     return `在 ${total} 条技能里没有明显待复审的（无长期未用 / 无易变方向久置）。`
   }
   const lines = entries.map((e, i) => `${i + 1}. ${e.name} — ${e.direction}（${e.reasons.join('、')}）`)
-  return `在 ${total} 条技能里，待复审优先级最高的 ${entries.length} 条：\n\n${lines.join('\n')}\n\n对可疑的一条用 skill_eval 触发 darwin-skill 评测。`
+  return `在 ${total} 条技能里，待复审优先级最高的 ${entries.length} 条：\n\n${lines.join('\n')}\n\n对可疑的一条加载 darwin-skill 跑评测；它把结果写进 .dsh/skills/darwin-skill/results.tsv，档案页的「证据」一栏会读它。`
 }

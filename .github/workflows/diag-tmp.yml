@@ -1,11 +1,12 @@
 name: CI diagnostic (temporary)
 
-# 临时诊断：本地复现不出 CI 的失败，而 Actions 日志 API 需要鉴权读不到。
-# 这步把 `node qa/gates.mjs` 的原始输出经 Contents API 可读地落回仓库，看完即撤。
-on: workflow_dispatch
+# 临时诊断：本地 macOS 复现不出 CI 的失败（干净克隆四闸全过），而 Actions 日志
+# 需要鉴权读不到。本作业在每次 push 后把 `node qa/gates.mjs` 的原始输出打成
+# artifact（公开仓库可匿名下载），看完即撤。
+on: push
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   diag:
@@ -29,14 +30,12 @@ jobs:
         run: |
           node -v > diag.txt 2>&1
           node -e "console.log('platform', process.platform, process.arch)" >> diag.txt 2>&1
+          echo "which pnpm: $(command -v pnpm || echo MISSING)" >> diag.txt 2>&1
           node qa/gates.mjs >> diag.txt 2>&1
-          echo "exit=$?" >> diag.txt
+          echo "gates-exit=$?" >> diag.txt
           git status --porcelain >> diag.txt 2>&1
-      - name: Publish diagnostic file
-        run: |
-          git config user.name "ci-diagnostic"
-          git config user.email "ci-diagnostic@users.noreply.github.com"
-          git add -f diag.txt
-          git commit -m "chore: temporary CI diagnostic from ${{ matrix.os }} node ${{ matrix.node }}"
-          git push origin HEAD:main
-        continue-on-error: true
+      - uses: actions/upload-artifact@v5
+        with:
+          name: diag-${{ matrix.os }}-node${{ matrix.node }}
+          path: diag.txt
+          if-no-files-found: error

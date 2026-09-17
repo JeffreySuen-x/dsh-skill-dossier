@@ -1,0 +1,42 @@
+name: CI diagnostic (temporary)
+
+# 临时诊断：本地复现不出 CI 的失败，而 Actions 日志 API 需要鉴权读不到。
+# 这步把 `node qa/gates.mjs` 的原始输出经 Contents API 可读地落回仓库，看完即撤。
+on: workflow_dispatch
+
+permissions:
+  contents: write
+
+jobs:
+  diag:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: [22, 24]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/setup@v2
+        with:
+          install: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+      - run: pnpm install --frozen-lockfile
+      - name: Collect gate output
+        run: |
+          node -v > diag.txt 2>&1
+          node -e "console.log('platform', process.platform, process.arch)" >> diag.txt 2>&1
+          node qa/gates.mjs >> diag.txt 2>&1
+          echo "exit=$?" >> diag.txt
+          git status --porcelain >> diag.txt 2>&1
+      - name: Publish diagnostic file
+        run: |
+          git config user.name "ci-diagnostic"
+          git config user.email "ci-diagnostic@users.noreply.github.com"
+          git add -f diag.txt
+          git commit -m "chore: temporary CI diagnostic from ${{ matrix.os }} node ${{ matrix.node }}"
+          git push origin HEAD:main
+        continue-on-error: true

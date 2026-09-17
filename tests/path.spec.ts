@@ -3,38 +3,19 @@ import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { isWithin, moveNoClobberCommand } from '../src/files.ts'
+import { moveNoClobberCommand } from '../src/files.ts'
 import { realpathWithin } from '../src/index.ts'
 
-describe('isWithin (lexical path guard)', () => {
-  const trash = '/root/.dsh/skill-manager/trash'
-
-  it('accepts a direct child of the trash dir', () => {
-    expect(isWithin(`${trash}/skill-1`, trash)).toBe(true)
-  })
-
-  it('accepts the trash dir itself', () => {
-    expect(isWithin(trash, trash)).toBe(true)
-  })
-
-  it('rejects `..` traversal out of the trash dir', () => {
-    expect(isWithin(`${trash}/../../../etc/passwd`, trash)).toBe(false)
-  })
-
-  it('rejects a sibling whose name shares the prefix', () => {
-    expect(isWithin('/root/.dsh/skill-manager/trash-evil/x', trash)).toBe(false)
-  })
-})
-
+// 纯函数的文本级断言在 tests/files.spec.ts；这里只测真跑 `/bin/sh` 的行为。
 describe('POSIX lifecycle move', () => {
-  it.skipIf(process.platform === 'win32')('moves when the destination is absent', () => {
+  it('moves when the destination is absent', () => {
     const base = mkdtempSync(join(tmpdir(), 'sm-move-'))
     try {
       const source = join(base, 'source')
       const destination = join(base, 'destination')
       writeFileSync(source, 'source')
 
-      const result = spawnSync('/bin/sh', ['-c', moveNoClobberCommand(source, destination, false)])
+      const result = spawnSync('/bin/sh', ['-c', moveNoClobberCommand(source, destination)])
 
       expect(result.status).toBe(0)
       expect(existsSync(source)).toBe(false)
@@ -42,7 +23,7 @@ describe('POSIX lifecycle move', () => {
     } finally { rmSync(base, { recursive: true, force: true }) }
   })
 
-  it.skipIf(process.platform === 'win32')('fails without overwriting when the destination exists', () => {
+  it('fails without overwriting when the destination exists', () => {
     const base = mkdtempSync(join(tmpdir(), 'sm-move-'))
     try {
       const source = join(base, 'source')
@@ -50,7 +31,7 @@ describe('POSIX lifecycle move', () => {
       writeFileSync(source, 'source')
       writeFileSync(destination, 'destination')
 
-      const result = spawnSync('/bin/sh', ['-c', moveNoClobberCommand(source, destination, false)])
+      const result = spawnSync('/bin/sh', ['-c', moveNoClobberCommand(source, destination)])
 
       expect(result.status).not.toBe(0)
       expect(readFileSync(source, 'utf8')).toBe('source')
@@ -58,20 +39,20 @@ describe('POSIX lifecycle move', () => {
     } finally { rmSync(base, { recursive: true, force: true }) }
   })
 
-  it.skipIf(process.platform === 'win32')('preserves the move failure when the source is missing', () => {
+  it('preserves the move failure when the source is missing', () => {
     const base = mkdtempSync(join(tmpdir(), 'sm-move-'))
     try {
       const source = join(base, 'missing-source')
       const destination = join(base, 'destination')
 
-      const result = spawnSync('/bin/sh', ['-c', moveNoClobberCommand(source, destination, false)])
+      const result = spawnSync('/bin/sh', ['-c', moveNoClobberCommand(source, destination)])
 
       expect(result.status).not.toBe(0)
       expect(existsSync(destination)).toBe(false)
     } finally { rmSync(base, { recursive: true, force: true }) }
   })
 
-  it.skipIf(process.platform === 'win32')('detects and reverses a destination-directory race', () => {
+  it('detects and reverses a destination-directory race', () => {
     const base = mkdtempSync(join(tmpdir(), 'sm-move-'))
     try {
       const source = join(base, 'source')
@@ -90,7 +71,7 @@ exec /bin/mv "$@"
 `)
       chmodSync(fakeMv, 0o755)
 
-      const result = spawnSync('/bin/sh', ['-c', moveNoClobberCommand(source, destination, false)], {
+      const result = spawnSync('/bin/sh', ['-c', moveNoClobberCommand(source, destination)], {
         env: {
           ...process.env,
           PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
@@ -105,7 +86,7 @@ exec /bin/mv "$@"
     } finally { rmSync(base, { recursive: true, force: true }) }
   })
 
-  it.skipIf(process.platform === 'win32')('rejects a cross-device move before changing the source', () => {
+  it('rejects a cross-device move before changing the source', () => {
     const base = mkdtempSync(join(tmpdir(), 'sm-move-'))
     try {
       const source = join(base, 'source')
@@ -132,7 +113,7 @@ exec /bin/mv "$@"
       chmodSync(fakeStat, 0o755)
       chmodSync(fakeMv, 0o755)
 
-      const result = spawnSync('/bin/sh', ['-c', moveNoClobberCommand(source, destination, false)], {
+      const result = spawnSync('/bin/sh', ['-c', moveNoClobberCommand(source, destination)], {
         env: {
           ...process.env,
           PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
@@ -149,7 +130,7 @@ exec /bin/mv "$@"
     } finally { rmSync(base, { recursive: true, force: true }) }
   })
 
-  it.skipIf(process.platform === 'win32')('follows a symlinked destination parent for the device check', () => {
+  it('follows a symlinked destination parent for the device check', () => {
     const base = mkdtempSync(join(tmpdir(), 'sm-move-'))
     try {
       const source = join(base, 'source')
@@ -186,7 +167,7 @@ rm "$1"
       chmodSync(fakeStat, 0o755)
       chmodSync(fakeMv, 0o755)
 
-      const result = spawnSync('/bin/sh', ['-c', moveNoClobberCommand(source, destination, false)], {
+      const result = spawnSync('/bin/sh', ['-c', moveNoClobberCommand(source, destination)], {
         env: {
           ...process.env,
           PATH: `${fakeBin}:${process.env.PATH ?? ''}`,

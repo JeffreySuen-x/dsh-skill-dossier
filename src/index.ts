@@ -29,8 +29,6 @@ import { estimateSkillTokens } from './tokens.ts'
 import { defaultSkillRoots, scanSkillRoots, type ScanDirEntry } from './scanner.ts'
 import { normalizeReportConfig, registerReportApi, type ReportAgentsLike, type ReportFsLike, type ReportWebServerLike } from './report.ts'
 
-/** 与 base bundle 选择 bash/pwsh 的分支一致（process.platform === 'win32'）。 */
-const IS_WINDOWS = process.platform === 'win32'
 
 /** realpath 白名单：candidate 解析符号链接后必须仍落在 dir 的 realpath 内。
  * dir 先解析——dir 不存在（记录里的 root 被篡改）一律返回 false 拒绝；
@@ -198,7 +196,7 @@ export function apply(ctx: Context, config?: Config): void {
     root: string,
   ): Promise<void> {
     try {
-      await runShell(moveNoClobberCommand(source, destination, IS_WINDOWS), root)
+      await runShell(moveNoClobberCommand(source, destination), root)
     } catch (rollbackError) {
       throw new Error(
         `索引提交失败：${errorMessage(operationError)}；文件回滚失败：${errorMessage(rollbackError)}`,
@@ -226,7 +224,7 @@ export function apply(ctx: Context, config?: Config): void {
         if ((error as { code?: unknown }).code !== 'ENOENT') throw error
         canonical = resolvePath(cwd)
       }
-      return IS_WINDOWS ? canonical.toLowerCase() : canonical
+      return canonical
     },
     async read(cwd) {
       const target = await fs.resolve(join(cwd, '.dsh', 'skill-manager', 'index.json'), { cwd })
@@ -236,13 +234,13 @@ export function apply(ctx: Context, config?: Config): void {
       const dir = join(cwd, '.dsh', 'skill-manager')
       const targetPath = join(dir, 'index.json')
       const temporaryPath = join(dir, `.index.json.${process.pid}-${randomUUID()}.tmp`)
-      await runShell(mkdirCommand(dir, IS_WINDOWS), join(cwd, '.dsh'))
+      await runShell(mkdirCommand(dir), join(cwd, '.dsh'))
       const temporaryTarget = await fs.resolve(temporaryPath, { cwd })
       try {
         await fs.writeText(temporaryTarget, value, undefined, undefined, indexWritePolicy(cwd))
-        await runShell(atomicReplaceCommand(temporaryPath, targetPath, IS_WINDOWS), dir)
+        await runShell(atomicReplaceCommand(temporaryPath, targetPath), dir)
       } catch (error) {
-        try { await runShell(removeFileCommand(temporaryPath, IS_WINDOWS), dir) } catch { /* best-effort temp cleanup */ }
+        try { await runShell(removeFileCommand(temporaryPath), dir) } catch { /* best-effort temp cleanup */ }
         throw error
       }
     },
@@ -262,7 +260,7 @@ export function apply(ctx: Context, config?: Config): void {
       try {
         const policy = sandboxPolicy!.resolve({ session: agent.session })
         for (const dir of [join(cwd, '.dsh', 'skill-manager'), join(cwd, 'reporter', 'brief')]) {
-          await runShell(mkdirCommand(dir, IS_WINDOWS), dir, policy)
+          await runShell(mkdirCommand(dir), dir, policy)
         }
       } catch (error) {
         logger?.warn?.(`skill-manager: 记录目录初始化失败（不影响使用，下次再试）：${errorMessage(error)}`)
@@ -789,8 +787,8 @@ export function apply(ctx: Context, config?: Config): void {
       await indexStore.update(
         cwd,
         async (index) => {
-          await runShell(mkdirCommand(trashDir, IS_WINDOWS), entryInfo.root)
-          await runShell(moveNoClobberCommand(entryInfo.entry, trashedPath, IS_WINDOWS), entryInfo.root)
+          await runShell(mkdirCommand(trashDir), entryInfo.root)
+          await runShell(moveNoClobberCommand(entryInfo.entry, trashedPath), entryInfo.root)
           moved = true
           index.trash[name] = { name, originalPath: entryInfo.entry, trashedPath, root: entryInfo.root, removedAt }
         },
@@ -819,7 +817,7 @@ export function apply(ctx: Context, config?: Config): void {
           }
           if (await realpathWithin(trashedPath, trashDirOf(root)) !== true) rejectIndexOperation('停用记录路径异常，拒绝操作')
           if (!isWithin(originalPath, root)) rejectIndexOperation('停用记录路径异常，拒绝操作')
-          await runShell(moveNoClobberCommand(trashedPath, originalPath, IS_WINDOWS), root)
+          await runShell(moveNoClobberCommand(trashedPath, originalPath), root)
           rollback = { source: originalPath, destination: trashedPath, root }
           delete index.trash[name]
           return { ok: true }
@@ -846,7 +844,7 @@ export function apply(ctx: Context, config?: Config): void {
           rejectIndexOperation('停用记录损坏')
         }
         if (await realpathWithin(trashedPath, trashDirOf(root)) === false) rejectIndexOperation('停用记录路径异常，拒绝操作')
-        await runShell(removeRecursiveCommand(trashedPath, IS_WINDOWS), root)
+        await runShell(removeRecursiveCommand(trashedPath), root)
         delete index.trash[name]
         return { ok: true }
       })
@@ -905,7 +903,7 @@ export function apply(ctx: Context, config?: Config): void {
         if (agent === undefined) throw new Error('找不到对应 agent（会话可能已结束）')
         const policy = sandboxPolicy.resolve({ session: agent.session })
         const target = join(cwd, active.dataRoot, active.briefDir)
-        await runShell(mkdirCommand(target, IS_WINDOWS), target, policy)
+        await runShell(mkdirCommand(target), target, policy)
       },
     })
   }

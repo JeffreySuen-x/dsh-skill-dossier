@@ -13,9 +13,10 @@ import { describe, expect, it } from 'vitest'
  * 任何**新增**产物（新的 css 入口、换打包器、`.map`、生成的 `.d.ts`）都不在它
  * 的保护范围内。这里把闸门放宽到「全部已提交文件」，让同类泄漏在提交时就红。
  *
- * 已知无害、因此被排除的两类：
- * - 本文件自身：它必须包含这些模式才能检测它们；
- * - `tests/windows.spec.ts`：`C:\Users\demo\...` 是跨平台路径解析的假夹具。
+ * 已知无害、因此被排除的一类：本文件自身——它必须包含这些模式才能检测它们。
+ *
+ * 夹具命名约定：假路径要用**不可能撞真机**的形状（`/fakehome/u`、`/ws`），
+ * 别用 `/home/u`——那条会命中本闸门，`tests/scanner.spec.ts` 就这么红过 5 天。
  * `pnpm-lock.yaml` 的 `sha512-` 依赖完整性哈希与 `lib/*.map` 的 `sourcesContent`
  * 都不匹配下列模式，无需排除。
  */
@@ -28,7 +29,7 @@ const PATTERNS: Array<[string, RegExp]> = [
 ]
 
 const SELF = 'tests/no-local-paths.spec.ts'
-const ALLOWED = new Set([SELF, 'tests/windows.spec.ts'])
+const ALLOWED = new Set([SELF])
 
 describe('committed files', () => {
   it('do not embed this machine\u2019s absolute paths', () => {

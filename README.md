@@ -147,7 +147,9 @@ node qa/gates.mjs   # test / typecheck / build / pack 四闸
 
 ## 平台支持
 
-Windows / Linux / macOS。文件生命周期操作按平台生成 pwsh（Windows，用原生 `MoveFileExW`）或 bash（POSIX）命令；`tests/windows-runtime.spec.ts` 在 Windows runner 上真机调用验证。
+macOS / Linux。文件生命周期操作生成 bash/POSIX 命令，CI 在 macOS 与 Ubuntu × Node 22/24 上跑全套闸门。
+
+**不支持 Windows。** 2026-09-17 明确撤除：这条支线（pwsh 命令、`MoveFileExW` 原生移动）从未在真机上被验证过，却让 CI 长期挂着两条红腿——而一个常红的门会吃掉它后面所有门的信号（当时真实的失败藏在它后面 5 天没人看见）。要恢复 Windows 支持，先准备真机验证，别只把分支加回来。
 
 ## 已知边界
 
@@ -155,7 +157,7 @@ Windows / Linux / macOS。文件生命周期操作按平台生成 pwsh（Windows
 - **调用统计是观察数据**：只统计插件运行期间发生的调用，历史调用无法回溯补记。埋点写盘失败不会打断技能本身，但**不再静默**——面板顶部会显示「调用统计写盘失败」及原因。
 - **删除是两步的封装，不是第二条路径**：先移入 trash、再递归删除，两步各自的路径校验与失败回滚都复用；`rm` 失败时技能还留在 trash 里，仍可重装。非文件系统技能拒绝删除。
 - **生命周期移动要求同文件系统**：技能条目与 trash 目录跨挂载点时会在改文件前安全拒绝，不做非原子的 copy-delete。
-- **Windows/Linux 回归已写入 CI**，但只有在 GitHub Actions 真绿之后才算「实跑通过」。
+- **平台支持面**：macOS / Linux（见上节，Windows 已撤除）；CI 的全套闸门只有在 GitHub Actions 真绿之后才算「实跑通过」。
 
 ## 许可
 

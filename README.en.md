@@ -147,7 +147,9 @@ After editing `src/`, run `pnpm run build` and commit `lib/` — CI enforces `gi
 
 ## Platform support
 
-Windows / Linux / macOS. Lifecycle file operations emit pwsh (Windows, native `MoveFileExW`) or bash (POSIX) commands; `tests/windows-runtime.spec.ts` exercises the real Windows syscall on a Windows runner.
+macOS / Linux. Lifecycle file operations emit bash/POSIX commands; CI runs the full gate set on macOS and Ubuntu across Node 22/24.
+
+**Windows is not supported.** Support was explicitly removed on 2026-09-17: that branch (pwsh commands, native `MoveFileExW` moves) was never verified on real hardware, yet it kept two CI legs permanently red — and a permanently red gate swallows the signal of every gate behind it (the real failures hid behind it for five days). To bring Windows back, start with real-machine verification instead of just restoring the branches.
 
 ## Known boundaries
 
@@ -155,7 +157,7 @@ Windows / Linux / macOS. Lifecycle file operations emit pwsh (Windows, native `M
 - **Call stats are observational**: only calls made while the plugin is running are counted; historical calls cannot be reconstructed. A failed stats write never interrupts a skill, but it is **no longer silent** — the panel shows the failure and its reason.
 - **Delete wraps two steps, it is not a second path**: move into trash, then remove recursively — both steps keep their own path checks and failure rollback, and a failed `rm` leaves the skill restorable in trash. Non-filesystem skills are refused.
 - **Lifecycle moves require one filesystem**: a skill entry and its trash directory on different mounts are refused safely before any file changes; there is no non-atomic copy-delete.
-- **Windows/Linux regressions are wired into CI** but only count as "actually run" once GitHub Actions is green.
+- **Platform surface**: macOS / Linux (Windows removed — see above); the full CI gate set only counts as "actually run" once GitHub Actions is green.
 
 ## License
 

@@ -56,7 +56,7 @@ function hostContext(options: {
   const writeCalls: Array<{ target: string; policy: unknown }> = []
   /** ctx.on 注册的监听器；host 事件（tools/result、agent/inbox/claimed）由此驱动。 */
   const listeners = new Map<string, Array<(...args: any[]) => unknown>>()
-  const cwd = options.cwd ?? (process.platform === 'win32' ? 'C:\\workspace' : '/workspace')
+  const cwd = options.cwd ?? '/workspace'
   const globalRuntime = new Map<string, FakeSkill>()
   const sessionRuntime = new Map<string, Map<string, FakeSkill>>()
   const sessionDisposers = new Map<string, Set<() => void>>()
@@ -262,28 +262,20 @@ async function post(route: Route, body: unknown, headers: Record<string, string>
 
 function runNativeCommand(request: any): { exitCode: number; stderr: { text: string } } {
   const command = String(request?.command ?? '')
-  const result = process.platform === 'win32'
-    ? spawnSync('pwsh.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], { encoding: 'utf8' })
-    : spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8' })
+  const result = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8' })
   return { exitCode: result.status ?? 1, stderr: { text: result.stderr } }
 }
 
 function isAtomicReplace(command: string): boolean {
-  return process.platform === 'win32'
-    ? command.startsWith('[System.IO.File]::Move(')
-    : command.startsWith('mv -f -- ')
+  return command.startsWith('mv -f -- ')
 }
 
 function isTemporaryFileCleanup(command: string): boolean {
-  return process.platform === 'win32'
-    ? command.startsWith('Remove-Item -Force -LiteralPath ')
-    : command.startsWith('rm -f -- ')
+  return command.startsWith('rm -f -- ')
 }
 
 function isLifecycleMove(command: string): boolean {
-  return process.platform === 'win32'
-    ? command.includes('[DshSkillManagerNativeMove]::MoveFileEx(')
-    : command.includes('mv -n -- ')
+  return command.includes('mv -n -- ')
 }
 
 /**
@@ -309,16 +301,8 @@ async function rejectingSandboxWrite(
   }
 }
 
-/** 轮询等待异步副作用（埋点是 fire-and-forget，测试必须等它落定）。
- * 默认期限按平台给：插件启动会真跑一次 mkdir，而 Windows runner 起一次 PowerShell
- * 接近 1 秒（实测这条恰好卡在 1009ms 超时），Linux/macOS 仍保持 1 秒快速失败。 */
-const waitForPollMs = process.platform === 'win32' ? 15_000 : 1_000
-
-/** 真跑 PowerShell 的移动/回滚用例在 Windows 上要几秒到十几秒（实测最长 13.6s），
- * 5 秒的默认期限不够；非 Windows 上这些用例被 skip，所以只放宽 Windows。 */
-const lifecycleTimeout = process.platform === 'win32' ? 30_000 : undefined
-
-async function waitFor(condition: () => boolean | Promise<boolean>, timeoutMs = waitForPollMs): Promise<void> {
+/** 轮询等待异步副作用（埋点是 fire-and-forget，测试必须等它落定）。 */
+async function waitFor(condition: () => boolean | Promise<boolean>, timeoutMs = 1000): Promise<void> {
   const deadline = Date.now() + timeoutMs
   for (;;) {
     if (await condition()) return
@@ -583,7 +567,7 @@ describe('single-package host activation', () => {
     } finally {
       rmSync(base, { recursive: true, force: true })
     }
-  }, lifecycleTimeout)
+  })
 
   it('refuses to delete a skill that is not filesystem-backed', async () => {
     const { ctx, routes } = hostContext({
@@ -643,7 +627,7 @@ describe('single-package host activation', () => {
     } finally {
       rmSync(base, { recursive: true, force: true })
     }
-  }, lifecycleTimeout)
+  })
 
   it('moves a reinstalled skill back to trash when the index commit fails', async () => {
     const base = mkdtempSync(join(tmpdir(), 'dsh-skill-dossier-reinstall-'))
@@ -687,7 +671,7 @@ describe('single-package host activation', () => {
     } finally {
       rmSync(base, { recursive: true, force: true })
     }
-  }, lifecycleTimeout)
+  })
 
   it('reports both index and rollback errors when lifecycle recovery fails', async () => {
     let lifecycleMoves = 0

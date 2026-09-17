@@ -1,9 +1,10 @@
 /**
- * 纯函数：跨平台路径解析与 shell 命令生成。
+ * 纯函数：路径解析与 POSIX shell 命令生成。
  *
- * 路径操作通过注入的 {@link PathFns}（node:path 的 posix/win32 实现）完成，
- * 命令生成按 `isWindows` 分支（bash vs pwsh），使 Windows 行为能在非 Windows
- * 机器上直接单测，而无需真机。
+ * 路径操作通过注入的 {@link PathFns} 完成，命令生成一律是 bash/POSIX —— 本插件
+ * 只支持 macOS 与 Linux。**Windows 支持已在 2026-09-17 撤除**：那条支线（pwsh
+ * 命令、`MoveFileExW` 原生移动）从未在真机上被验证过，却让 CI 长期挂着一条红腿，
+ * 而一个常红的门会吃掉它后面所有门的信号——要恢复就得先有真机验证，别只把分支加回来。
  */
 import * as path from 'node:path'
 
@@ -15,16 +16,27 @@ export interface PathFns {
   resolve(...parts: string[]): string
   relative(from: string, to: string): string
   isAbsolute(p: string): boolean
+  sep: string
 }
 
 /** 默认按运行平台（node:path）。 */
 export const defaultPath: PathFns = path
 
-/** 判断 candidate 词法解析后是否仍在 dir 目录内（解析 `..`，不解析符号链接）。
- * `relative` 在跨盘（Windows）时返回目标绝对路径，故用 isAbsolute 一并拦截。 */
+/**
+ * 判断 candidate 词法解析后是否仍在 dir 目录内（解析 `..`，不解析符号链接）。
+ *
+ * 判据必须是**按路径段**比较：早期版本用 `rel.startsWith('..')`，于是 `<dir>/..foo/x`
+ * 这种名字以 `..` 开头的正常子目录会被误判成「在外面」。这不是纯美观问题——调用方
+ * 拿它决定沙箱档位（`isWithin(target, ws) ? 'workspace-write' : 'danger-full-access'`），
+ * 误判会把本可受限执行的 `mv`/`rm -rf` 升格成全权执行。
+ *
+ * `relative` 跨盘（Windows）时返回目标绝对路径，故用 isAbsolute 一并拦截。
+ */
 export function isWithin(candidate: string, dir: string, p: PathFns = defaultPath): boolean {
   const rel = p.relative(p.resolve(dir), p.resolve(candidate))
-  return rel === '' || (!rel.startsWith('..') && !p.isAbsolute(rel))
+  if (rel === '') return true
+  if (p.isAbsolute(rel)) return false
+  return !rel.split(p.sep).includes('..')
 }
 
 interface MovableSkill { name: string; path?: string }
@@ -38,9 +50,12 @@ interface MovableSkill { name: string; path?: string }
  * frontmatter `name` 不一致的技能（本机实测 4 个：`book-to-skill-master`、
  * `god-skill-main` 等）会被误判成「不是文件系统技能」，生命周期操作全废。
  * 目录名是源仓库的目录名，frontmatter `name` 才是调用名——两者不必然相等。
+ *
+ * 路径必须是绝对的：`'SKILL.md'` 这种相对路径会反推出 `root: '..'`，而 root 会喂给
+ * `trashDirOf()` 与 `rm -rf`，entry 会作为 `mv` 的源（cwd = root）。
  */
 export function fsEntryOf(skill: MovableSkill, p: PathFns = defaultPath): { entry: string; root: string } | undefined {
-  if (typeof skill.path !== 'string') return undefined
+  if (typeof skill.path !== 'string' || !p.isAbsolute(skill.path)) return undefined
   const base = p.basename(skill.path)
   if (base === 'SKILL.md') {
     const dir = p.dirname(skill.path)
@@ -58,41 +73,27 @@ export function trashDirOf(root: string, p: PathFns = defaultPath): string {
   return p.join(p.dirname(root), 'skill-manager', 'trash')
 }
 
-/** 把值转成 shell 单引号参数（POSIX 用 '\''，pwsh 用 ''）。 */
-export function quoteShellArg(value: string, isWindows: boolean): string {
-  const v = String(value)
-  return isWindows ? `'${v.replaceAll("'", "''")}'` : `'${v.replaceAll("'", "'\\''")}'`
+/** 把值转成 shell 单引号参数（POSIX：内嵌单引号写成 '\''）。 */
+export function quoteShellArg(value: string): string {
+  return `'${String(value).replaceAll("'", "'\\''")}'`
 }
 
-export function mkdirCommand(dir: string, isWindows: boolean): string {
-  return isWindows
-    ? `[System.IO.Directory]::CreateDirectory(${quoteShellArg(dir, true)}) | Out-Null`
-    : `mkdir -p ${quoteShellArg(dir, isWindows)}`
+export function mkdirCommand(dir: string): string {
+  return `mkdir -p ${quoteShellArg(dir)}`
 }
 
 function posixIdentityCommand(target: string, followSymlink = false): string {
-  const value = quoteShellArg(target, false)
+  const value = quoteShellArg(target)
   const dereference = followSymlink ? '-L ' : ''
   return `stat ${dereference}-c '%d:%i' -- ${value} 2>/dev/null || stat ${dereference}-f '%d:%i' -- ${value} 2>/dev/null`
 }
 
-export function moveNoClobberCommand(src: string, dst: string, isWindows: boolean): string {
-  const source = quoteShellArg(src, isWindows)
-  const destination = quoteShellArg(dst, isWindows)
-  if (isWindows) {
-    const typeDefinition = 'using System; using System.Runtime.InteropServices; '
-      + 'public static class DshSkillManagerNativeMove { '
-      + '[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] '
-      + '[return: MarshalAs(UnmanagedType.Bool)] '
-      + 'public static extern bool MoveFileEx(string existingName, string newName, uint flags); }'
-    return `if (-not ('DshSkillManagerNativeMove' -as [type])) { Add-Type -TypeDefinition ${quoteShellArg(typeDefinition, true)} }; `
-      + `if (-not ([DshSkillManagerNativeMove]::MoveFileEx(${source}, ${destination}, 0))) { `
-      + `$nativeError = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error(); `
-      + `throw [System.ComponentModel.Win32Exception]::new($nativeError) }`
-  }
+export function moveNoClobberCommand(src: string, dst: string): string {
+  const source = quoteShellArg(src)
+  const destination = quoteShellArg(dst)
   const nestedPath = path.posix.join(dst, path.posix.basename(src))
   const destinationParentPath = path.posix.dirname(dst)
-  const nested = quoteShellArg(nestedPath, false)
+  const nested = quoteShellArg(nestedPath)
   const sourceIdentity = posixIdentityCommand(src)
   const destinationParentIdentity = posixIdentityCommand(destinationParentPath, true)
   const destinationIdentity = posixIdentityCommand(dst)
@@ -115,22 +116,16 @@ export function moveNoClobberCommand(src: string, dst: string, isWindows: boolea
     + `echo 'destination changed during move' >&2; exit 18`
 }
 
-export function removeRecursiveCommand(path: string, isWindows: boolean): string {
-  return isWindows
-    ? `Remove-Item -Recurse -Force -LiteralPath ${quoteShellArg(path, true)}`
-    : `rm -rf -- ${quoteShellArg(path, isWindows)}`
+export function removeRecursiveCommand(path: string): string {
+  return `rm -rf -- ${quoteShellArg(path)}`
 }
 
 /** Replace a file by renaming a same-directory temporary file over it. */
-export function atomicReplaceCommand(src: string, dst: string, isWindows: boolean): string {
-  return isWindows
-    ? `[System.IO.File]::Move(${quoteShellArg(src, true)}, ${quoteShellArg(dst, true)}, $true)`
-    : `mv -f -- ${quoteShellArg(src, false)} ${quoteShellArg(dst, false)}`
+export function atomicReplaceCommand(src: string, dst: string): string {
+  return `mv -f -- ${quoteShellArg(src)} ${quoteShellArg(dst)}`
 }
 
 /** Remove one staging file without interpreting wildcard characters. */
-export function removeFileCommand(path: string, isWindows: boolean): string {
-  return isWindows
-    ? `Remove-Item -Force -LiteralPath ${quoteShellArg(path, true)}`
-    : `rm -f -- ${quoteShellArg(path, false)}`
+export function removeFileCommand(path: string): string {
+  return `rm -f -- ${quoteShellArg(path)}`
 }

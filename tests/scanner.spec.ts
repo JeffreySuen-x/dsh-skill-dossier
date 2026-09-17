@@ -93,17 +93,17 @@ const skill = (name: string, description: string, extra = ''): string =>
 
 const ROOTS: SkillRoot[] = [
   { source: 'project-dsh', rank: 100, path: '/ws/.dsh/skills' },
-  { source: 'user-dsh', rank: 400, path: '/home/u/.dsh/skills' },
+  { source: 'user-dsh', rank: 400, path: '/fakehome/u/.dsh/skills' },
 ]
 
 describe('defaultSkillRoots', () => {
   it('按宿主优先级表给出四个根，rank 升序', () => {
-    const roots = defaultSkillRoots({ projectRoot: '/ws', dshHome: '/home/u/.dsh', agentsHome: '/home/u/.agents' })
+    const roots = defaultSkillRoots({ projectRoot: '/ws', dshHome: '/fakehome/u/.dsh', agentsHome: '/fakehome/u/.agents' })
     expect(roots.map((root) => [root.rank, root.source, root.path])).toEqual([
       [100, 'project-dsh', '/ws/.dsh/skills'],
       [200, 'project-agents', '/ws/.agents/skills'],
-      [400, 'user-dsh', '/home/u/.dsh/skills'],
-      [500, 'user-agents', '/home/u/.agents/skills'],
+      [400, 'user-dsh', '/fakehome/u/.dsh/skills'],
+      [500, 'user-agents', '/fakehome/u/.agents/skills'],
     ])
   })
 })
@@ -165,9 +165,9 @@ describe('scanSkillRoots', () => {
       '/ws/.dsh/skills': ['dup'],
       '/ws/.dsh/skills/dup': ['SKILL.md'],
       '/ws/.dsh/skills/dup/SKILL.md': body,
-      '/home/u/.dsh/skills': ['dup'],
-      '/home/u/.dsh/skills/dup': ['SKILL.md'],
-      '/home/u/.dsh/skills/dup/SKILL.md': body,
+      '/fakehome/u/.dsh/skills': ['dup'],
+      '/fakehome/u/.dsh/skills/dup': ['SKILL.md'],
+      '/fakehome/u/.dsh/skills/dup/SKILL.md': body,
     })
     const result = await scanSkillRoots(fs, ROOTS, { hash })
     expect(result.summary.winners).toBe(1)
@@ -184,11 +184,11 @@ describe('scanSkillRoots', () => {
       '/ws/.dsh/skills/same/SKILL.md': skill('same', 'x'),
       '/ws/.dsh/skills/drift': ['SKILL.md'],
       '/ws/.dsh/skills/drift/SKILL.md': skill('drift', '项目版'),
-      '/home/u/.dsh/skills': ['same', 'drift'],
-      '/home/u/.dsh/skills/same': ['SKILL.md'],
-      '/home/u/.dsh/skills/same/SKILL.md': skill('same', 'x'),
-      '/home/u/.dsh/skills/drift': ['SKILL.md'],
-      '/home/u/.dsh/skills/drift/SKILL.md': skill('drift', '用户版改过了'),
+      '/fakehome/u/.dsh/skills': ['same', 'drift'],
+      '/fakehome/u/.dsh/skills/same': ['SKILL.md'],
+      '/fakehome/u/.dsh/skills/same/SKILL.md': skill('same', 'x'),
+      '/fakehome/u/.dsh/skills/drift': ['SKILL.md'],
+      '/fakehome/u/.dsh/skills/drift/SKILL.md': skill('drift', '用户版改过了'),
     })
     const result = await scanSkillRoots(fs, ROOTS, { hash })
     expect(result.summary.conflicts.map((c) => c.name)).toEqual(['drift', 'same'])

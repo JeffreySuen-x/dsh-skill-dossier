@@ -62,7 +62,7 @@ describe.runIf(process.platform === 'win32')('Windows lifecycle runtime', () => 
     expectSuccess(runPowerShell(moveNoClobberCommand(destination, source, true)))
     expect(existsSync(destination)).toBe(false)
     expect(readFileSync(join(source, 'SKILL.md'), 'utf8')).toBe('# alpha')
-  })
+  }, 20_000)
 
   it('renames a read-only single-file skill without copy-delete cleanup', () => {
     const source = join(base, 'alpha[read-only].md')

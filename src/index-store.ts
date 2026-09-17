@@ -128,7 +128,15 @@ export function createIndexStore(storage: IndexStorage): IndexStore {
         try {
           await storage.writeAtomic(cwd, JSON.stringify(index, null, 2))
         } catch (error) {
-          await recoverWriteFailure?.(error)
+          try {
+            await recoverWriteFailure?.(error)
+          } catch (recoveryError) {
+            // 回滚自己失败时不能顶替原始写盘错误：调用方（如 reinstall）要靠它判断
+            // 「索引没写进去」，而回滚失败是另一个（更严重的）事实，附在 message 上一起报。
+            const detail = recoveryError instanceof Error ? recoveryError.message : String(recoveryError)
+            const reason = error instanceof Error ? error.message : String(error)
+            throw new Error(`${reason}（回滚亦失败：${detail}）`)
+          }
           throw error
         }
         return result

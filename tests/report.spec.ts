@@ -34,7 +34,9 @@ describe('brief report contract', () => {
 
   it('selects current or latest monthly data', () => {
     expect(pickMonth(['2026-08-31', '2026-09-03'], '2026-09')).toEqual({ month: '2026-09', fallbackMonth: '', dates: ['2026-09-03'] })
-    expect(pickMonth(['2026-08-30', '2026-08-31'], '2026-09')).toEqual({ month: '2026-08', fallbackMonth: '2026-08', dates: ['2026-08-30', '2026-08-31'] })
+    // 回退时 fallbackMonth 报的是**请求的**月份（客户端渲染「回退自 X」），
+    // 不是回退到的那个月——否则月报会显示「2026-08 · 回退自 2026-08」。
+    expect(pickMonth(['2026-08-30', '2026-08-31'], '2026-09')).toEqual({ month: '2026-08', fallbackMonth: '2026-09', dates: ['2026-08-30', '2026-08-31'] })
     expect(pickMonth([], '2026-09')).toEqual({ month: '2026-09', fallbackMonth: '', dates: [] })
   })
 

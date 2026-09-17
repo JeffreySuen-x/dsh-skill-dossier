@@ -190,11 +190,6 @@ export function parseFrontmatter(text: string): Record<string, string> {
   return fields
 }
 
-/** 判定一个条目是否是技能：bundle 目录（含 `SKILL.md`）或平铺 `<name>.md`。 */
-export function isSkillEntryName(name: string): boolean {
-  return name.endsWith('.md') || !name.startsWith('.')
-}
-
 /**
  * 扫描全部技能根。
  *
@@ -270,22 +265,22 @@ async function scanEntry(
   deps: { hash: (text: string) => string },
 ): Promise<ScannedSkill | undefined> {
   const entryPath = joinRoot(root.path, entry.name)
-  // 类型以 stat 为准（跟随软链）；entry.type 只作提示——见 ScanDirEntry 注释。
-  let kind = entry.type
+  // 类型一律以 stat 为准（跟随软链）：`entry.type` 来自 dirent，对目录软链会答
+  // 「other」，只能当提示、不能当判据——见 ScanDirEntry 注释。故这里不再读它。
+  let info
   try {
-    const info = await fs.stat(entry.target)
-    if (info === undefined) return undefined
-    kind = info.type
+    info = await fs.stat(entry.target)
   } catch {
     return undefined
   }
-  const isDir = kind === 'directory'
+  if (info === undefined) return undefined
+  const isDir = info.type === 'directory'
   let skillPath: string
   let dirName: string
   if (isDir) {
     skillPath = joinRoot(entryPath, 'SKILL.md')
     dirName = entry.name
-  } else if (kind === 'file' && entry.name.endsWith('.md')) {
+  } else if (info.type === 'file' && entry.name.endsWith('.md')) {
     skillPath = entryPath
     dirName = entry.name.slice(0, -3)
   } else {

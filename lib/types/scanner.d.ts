@@ -147,8 +147,6 @@ export declare function catalogDescription(description: string, maxLength?: numb
  * 因此解析失败不抛错——拿不到就是空值，浮出到面板上比静默跳过有用。
  */
 export declare function parseFrontmatter(text: string): Record<string, string>;
-/** 判定一个条目是否是技能：bundle 目录（含 `SKILL.md`）或平铺 `<name>.md`。 */
-export declare function isSkillEntryName(name: string): boolean;
 /**
  * 扫描全部技能根。
  *

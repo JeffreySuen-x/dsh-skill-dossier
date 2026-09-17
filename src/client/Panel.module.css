@@ -44,21 +44,23 @@
   color: var(--dsw-alias-label-primary-foreground, #fff);
 }
 
-/* ---------- 弹层：原生菜单外壳 ---------- */
+/* ---------- 弹层：固定定位的管理面板 ---------- */
 
+/* 一处定义。曾经在文件末尾又写了一遍 `.panel` 覆盖 position/padding 等五项，
+   同特异性下后者整段生效、前者其余声明仍在——有效样式散在两处，改哪处都容易漏。 */
 .panel {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
+  position: fixed;
+  top: 8vh;
+  right: 2vw;
   z-index: 100;
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
-  width: min(620px, 90vw);
-  max-height: min(560px, 75vh);
+  width: min(620px, 96vw);
+  max-height: 84vh;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 4px;
+  padding: 16px;
   border: 0;
   border-radius: 20px;
   background: var(--dsw-specific-menu, #fff);
@@ -399,7 +401,7 @@
 }
 
 .detailSrc {
-  font-family: var(--ds-font-family-code, "SF Mono", Menlo, monospace);
+  font-family: var(--dsw-font-family-code, "SF Mono", Menlo, monospace);
   font-size: 11px;
   line-height: 16px;
   color: var(--dsw-alias-label-caption, #adb2b8);
@@ -421,7 +423,7 @@
   border-radius: 8px;
   background: var(--dsw-alias-markdown-code-block, #f9fafb);
   color: var(--dsw-alias-label-primary, #0f1115);
-  font-family: var(--ds-font-family-code, "SF Mono", Menlo, monospace);
+  font-family: var(--dsw-font-family-code, "SF Mono", Menlo, monospace);
   font-size: 12px;
   line-height: 19px;
   white-space: pre-wrap;
@@ -620,8 +622,7 @@
   }
 }
 
-/* 一个管理入口；用量需要更宽的绘图区。 */
-.panel { position: fixed; top: 8vh; right: 2vw; width: min(620px, 96vw); max-height: 84vh; padding: 16px; }
+/* 一个固定定位的管理面板；用量页需要更宽的绘图区。 */
 .usagePanel { width: min(1200px, 96vw); }
 .header > strong { flex: 1; }
 .toggle > svg { width: 16px; height: 16px; }

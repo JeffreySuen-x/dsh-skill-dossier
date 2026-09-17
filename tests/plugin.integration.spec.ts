@@ -707,6 +707,70 @@ describe('single-package host activation', () => {
     expect(response.body.error).toContain('rollback failed')
   })
 
+  // 回归：uninstall 把 name 拼进 `join(trashDir, name-removedAt)`，而它此前是三个
+  // 生命周期操作里唯一不过 NAME_RE 的——畸形名字会让「移入回收站」的目标逃出 trash。
+  // 构造要够狠：盘面上**真的**注册一个畸形名字的技能，否则 `skills.get()` 先返回
+  // 「技能不存在」，旧代码也能过，测试就白写了。
+  it('rejects a malformed skill name before touching the filesystem', async () => {
+    const { ctx, routes, shellCommands } = hostContext({
+      skill: {
+        name: '../evil',
+        description: 'malformed name',
+        invocation: { modelInvocable: true, userInvocable: true },
+        source: 'custom',
+        provider: 'filesystem',
+        content: '# evil',
+        path: '/workspace/skills/evil/SKILL.md',
+      },
+    })
+    apply(ctx as never)
+
+    const response = await post(routes.get('/api/skill-manager')!, {
+      method: 'uninstall',
+      args: { sessionId: 'session-1', name: '../evil' },
+    })
+
+    expect(response.body).toEqual({ ok: false, error: '无效的技能名' })
+    // 只断言「没有任何生命周期操作」：插件启动本身会 mkdir 两个记录目录，那不算。
+    expect(shellCommands.filter(isLifecycleMove)).toEqual([])
+    expect(shellCommands.filter((command) => command.startsWith('rm '))).toEqual([])
+  })
+
+  // 回归：判据要 fail-closed。trash 目录存在、记录里的路径不存在时，`realpathWithin`
+  // 返回 null —— 旧代码把它当成「可以继续」，紧接着就是 rm -rf；reinstall 用的却是
+  // `!== true`。这条必须让 trash 目录真实存在，否则两条分支都返回 false，测不出差异。
+  it('fails closed on a trash record whose path no longer resolves', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'dsh-skill-dossier-trash-'))
+    const root = join(base, 'skills')
+    const trashDir = join(base, 'skill-manager', 'trash')
+    const trashedPath = join(trashDir, 'ghost-1')
+    let removeCalled = false
+    try {
+      mkdirSync(trashDir, { recursive: true })
+      const { ctx, routes } = hostContext({
+        indexText: JSON.stringify({
+          version: 1,
+          skills: {},
+          trash: { ghost: { name: 'ghost', originalPath: join(root, 'ghost'), trashedPath, root, removedAt: 1 } },
+          usage: {},
+        }),
+        shellRun: async (request) => {
+          if (String(request?.command ?? '').startsWith('rm -rf')) removeCalled = true
+          return { exitCode: 0 }
+        },
+      })
+      apply(ctx as never)
+
+      const response = await post(routes.get('/api/skill-manager')!, {
+        method: 'deleteTrash',
+        args: { sessionId: 'session-1', name: 'ghost' },
+      })
+
+      expect(response.body).toEqual({ ok: false, error: '停用记录路径异常，拒绝操作' })
+      expect(removeCalled).toBe(false)
+    } finally { rmSync(base, { recursive: true, force: true }) }
+  })
+
   it('parses the real brief contract and keeps the report half read-only', async () => {
     const writes: Array<{ target: string; content: string }> = []
     const followups: unknown[] = []

@@ -14,6 +14,6 @@ describe('GitHub Actions contract', () => {
     expect(workflow).toContain('actions/setup-node@v7')
     expect(workflow).toContain('pnpm install --frozen-lockfile')
     expect(workflow).toContain('node qa/gates.mjs')
-    expect(workflow).toContain('git diff --exit-code -- lib')
+    expect(workflow).toContain('git status --porcelain --untracked-files=all -- lib')
   })
 })

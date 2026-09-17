@@ -329,6 +329,9 @@ export function apply(ctx: Context, config?: Config): void {
     })
   }
 
+  // 下面这处判空是**真防御**，不是恒真：`ctx.on` 不在 apply() 开头检查的那七个
+  // 服务里，最小宿主（如 pack-smoke 的冒烟宿主）可以没有它——删掉会让挂载直接抛
+  // TypeError，pack 闸会红。
   if (ctx.on !== undefined) {
     // DSH 的 tools/agent 事件经声明合并注册进 cordis Events；本包未把它们纳入
     // 编译（运行时共存即可），故对 ctx.on 收窄为仅含这两个事件名的签名。
@@ -370,7 +373,9 @@ export function apply(ctx: Context, config?: Config): void {
 
   // ---------- 模型工具：skill_archive ----------
 
-  if (tools !== undefined) {
+  // 裸块是给三个工具注册划一段；工具名登记只要求 tools 服务在场，
+  // 而 apply() 开头已统一判过，故这里不再重复判空（重复判空恒真）。
+  {
     tools.register({
       name: 'skill_archive',
       description: '为技能写档案（方向分类、使用范围、能力边界、应用场景），持久化到工作区 .dsh/skill-manager/index.json。先读取技能内容并分析，再调用本工具落盘。',
@@ -773,6 +778,7 @@ export function apply(ctx: Context, config?: Config): void {
     async uninstall(args) {
       if (args === null || typeof args !== 'object' || typeof args.name !== 'string') return { ok: false, error: '参数无效' }
       const name = args.name
+      if (!NAME_RE.test(name)) return { ok: false, error: '无效的技能名' }
       const sessionId = typeof args.sessionId === 'string' ? args.sessionId : undefined
       const skill = await skills.get(name, viewOptions(sessionId))
       if (skill === undefined) return { ok: false, error: `技能 "${name}" 不存在` }
@@ -802,6 +808,7 @@ export function apply(ctx: Context, config?: Config): void {
     async reinstall(args) {
       if (args === null || typeof args !== 'object' || typeof args.name !== 'string') return { ok: false, error: '参数无效' }
       const name = args.name
+      if (!NAME_RE.test(name)) return { ok: false, error: '无效的技能名' }
       const sessionId = typeof args.sessionId === 'string' ? args.sessionId : undefined
       const cwd = cwdOf(sessionId)
       if (cwd === undefined) return { ok: false, error: '无法确定当前工作目录' }
@@ -833,6 +840,7 @@ export function apply(ctx: Context, config?: Config): void {
     async deleteTrash(args) {
       if (args === null || typeof args !== 'object' || typeof args.name !== 'string') return { ok: false, error: '参数无效' }
       const name = args.name
+      if (!NAME_RE.test(name)) return { ok: false, error: '无效的技能名' }
       const sessionId = typeof args.sessionId === 'string' ? args.sessionId : undefined
       const cwd = cwdOf(sessionId)
       if (cwd === undefined) return { ok: false, error: '无法确定当前工作目录' }
@@ -843,7 +851,7 @@ export function apply(ctx: Context, config?: Config): void {
         if (typeof trashedPath !== 'string' || typeof root !== 'string' || trashedPath === '' || root === '') {
           rejectIndexOperation('停用记录损坏')
         }
-        if (await realpathWithin(trashedPath, trashDirOf(root)) === false) rejectIndexOperation('停用记录路径异常，拒绝操作')
+        if ((await realpathWithin(trashedPath, trashDirOf(root))) !== true) rejectIndexOperation('停用记录路径异常，拒绝操作')
         await runShell(removeRecursiveCommand(trashedPath), root)
         delete index.trash[name]
         return { ok: true }
@@ -888,23 +896,20 @@ export function apply(ctx: Context, config?: Config): void {
   // 之后每个新会话由 agent/created 立刻补建。
   for (const agent of agents.list?.() ?? []) provisionWorkspace(agent)
 
-  if (webServer !== undefined) {
-    ctx.effect(() => webServer.register({ kind: 'exact', path: '/api/skill-manager', handler: routeHandler }))
-  }
-  if (webServer !== undefined && agents !== undefined && fs !== undefined && sandboxPolicy !== undefined) {
-    const reportConfig = normalizeReportConfig(config?.report)
-    registerReportApi(ctx, {
-      webServer: webServer as unknown as ReportWebServerLike,
-      agents: agents as unknown as ReportAgentsLike,
-      fs: fs as unknown as ReportFsLike,
-      config: reportConfig,
-      ensureDirectories: async (cwd, sessionId, active) => {
-        const agent = agents.get(sessionId)
-        if (agent === undefined) throw new Error('找不到对应 agent（会话可能已结束）')
-        const policy = sandboxPolicy.resolve({ session: agent.session })
-        const target = join(cwd, active.dataRoot, active.briefDir)
-        await runShell(mkdirCommand(target), target, policy)
-      },
-    })
-  }
+  // 两个 API 的注册：`apply()` 开头已对七个服务做过全量早退，故这里不再重复判空
+  // （重复判空恒真，只会让读者以为服务可能缺席）。
+  ctx.effect(() => webServer.register({ kind: 'exact', path: '/api/skill-manager', handler: routeHandler }))
+  registerReportApi(ctx, {
+    webServer: webServer as unknown as ReportWebServerLike,
+    agents: agents as unknown as ReportAgentsLike,
+    fs: fs as unknown as ReportFsLike,
+    config: normalizeReportConfig(config?.report),
+    ensureDirectories: async (cwd, sessionId, active) => {
+      const agent = agents.get(sessionId)
+      if (agent === undefined) throw new Error('找不到对应 agent（会话可能已结束）')
+      const policy = sandboxPolicy.resolve({ session: agent.session })
+      const target = join(cwd, active.dataRoot, active.briefDir)
+      await runShell(mkdirCommand(target), target, policy)
+    },
+  })
 }

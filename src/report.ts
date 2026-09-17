@@ -145,7 +145,10 @@ export function pickMonth(allDates: string[], currentMonth: string): { month: st
   const latest = allDates.at(-1)
   if (latest === undefined) return { month: currentMonth, fallbackMonth: '', dates: [] }
   const month = latest.slice(0, 7)
-  return { month, fallbackMonth: month, dates: allDates.filter((date) => date.startsWith(month)) }
+  // fallbackMonth 报的是**请求的**月份，与 pickDailyDate/pickWeek 的 fallbackFrom 同口径：
+  // 客户端渲染成「回退自 ${fallbackFrom}」，若填回退到的那个月，就会显示
+  // 「月报 2026-08 · 回退自 2026-08」——自己回退给自己。
+  return { month, fallbackMonth: currentMonth, dates: allDates.filter((date) => date.startsWith(month)) }
 }
 
 function localDateKey(): string {

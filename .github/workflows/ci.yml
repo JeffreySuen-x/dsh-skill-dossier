@@ -32,4 +32,13 @@ jobs:
           # （见 tests/real-roots.spec.ts 头部说明）。
           DSH_REAL_ROOTS: '0'
       - name: Verify committed build artifacts
-        run: git diff --exit-code -- lib
+        # `git diff` 只看已跟踪文件：构建新生成、但没提交的 `lib/` 文件它看不见，
+        # 于是「产物集缺失/多出」能蒙过去。这里连未跟踪文件一起查。
+        run: |
+          output="$(git status --porcelain --untracked-files=all -- lib)"
+          if [ -n "$output" ]; then
+            echo "lib/ 与提交物不一致："
+            echo "$output"
+            exit 1
+          fi
+          echo "lib/ 与提交物一致"

@@ -148,4 +148,24 @@ describe('index store', () => {
       'write-succeeded',
     ])
   })
+
+  // 回归：回滚（真调用方里是 `await runShell(...)` 的移动回来）自己失败时，
+  // 不能把原始写盘错误顶掉——调用方要靠它判断「索引没写进去」，那是两件事。
+  it('reports the original write failure even when recovery itself throws', async () => {
+    const store = createIndexStore({
+      read: async () => '{"version":1,"skills":{},"trash":{},"usage":{}}',
+      writeAtomic: async () => { throw new Error('replace failed') },
+    })
+
+    const failure = await store
+      .update(
+        '/a',
+        (index) => { index.skills.alpha = { name: 'alpha' } },
+        async () => { throw new Error('rollback failed') },
+      )
+      .catch((error: unknown) => error as Error)
+
+    expect(failure.message).toContain('replace failed')
+    expect(failure.message).toContain('rollback failed')
+  })
 })

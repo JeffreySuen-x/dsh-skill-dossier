@@ -31,8 +31,7 @@ jobs:
           node -v > diag.txt 2>&1
           node -e "console.log('platform', process.platform, process.arch)" >> diag.txt 2>&1
           echo "which pnpm: $(command -v pnpm || echo MISSING)" >> diag.txt 2>&1
-          node qa/gates.mjs >> diag.txt 2>&1
-          echo "gates-exit=$?" >> diag.txt
+          node qa/gates.mjs >> diag.txt 2>&1 || echo "gates-exit=$?" >> diag.txt
           git status --porcelain >> diag.txt 2>&1
       - uses: actions/upload-artifact@v5
         with:

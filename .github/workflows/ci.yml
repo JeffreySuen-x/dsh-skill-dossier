@@ -27,6 +27,10 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: pnpm install --frozen-lockfile
       - run: node qa/gates.mjs
+        env:
+          # runner 上没有真实技能根，这条自检在干净机器上无意义
+          # （见 tests/real-roots.spec.ts 头部说明）。
+          DSH_REAL_ROOTS: '0'
       - name: Windows lifecycle smoke
         if: runner.os == 'Windows'
         run: pnpm run test:windows-smoke

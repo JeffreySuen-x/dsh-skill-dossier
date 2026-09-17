@@ -6,6 +6,9 @@
  * 两边对不上的地方，正是本插件存在的理由（被遮蔽者、坏技能、幽灵档）。
  *
  * 跑法：`npx vitest run tests/real-roots.spec.ts`
+ *
+ * 想强制跳过时设 `DSH_REAL_ROOTS=0`（CI 上没有真技能根，用这个显式跳过，
+ * 而不是靠断言碰运气）。
  */
 import { createHash } from 'node:crypto'
 import { readFile, readdir, stat } from 'node:fs/promises'
@@ -54,7 +57,10 @@ const roots = defaultSkillRoots({
   agentsHome: join(homedir(), '.agents'),
 })
 
-describe('真实技能根自检', () => {
+// 这台机器没有真实技能根时跳过（CI runner 就是这种机器，显式设 DSH_REAL_ROOTS=0）。
+const hasRealRoots = process.env.DSH_REAL_ROOTS !== '0'
+
+describe.skipIf(!hasRealRoots)('真实技能根自检', () => {
   it('扫出条目、赢家与冲突，并把三层成本算出来', async () => {
     const result = await scanSkillRoots(fs, roots, {
       hash: (text) => createHash('sha256').update(text).digest('hex').slice(0, 16),

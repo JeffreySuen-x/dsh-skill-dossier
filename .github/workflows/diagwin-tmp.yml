@@ -23,8 +23,8 @@ jobs:
         run: |
           node -v > diagwin.txt 2>&1
           $env:DSH_REAL_ROOTS='0'
-          node qa/gates.mjs >> diagwin.txt 2>&1
-          echo "gates-exit=$LASTEXITCODE" >> diagwin.txt
+          node node_modules/vitest/vitest.mjs run --testTimeout=180000 >> diagwin.txt 2>&1
+          echo "vitest-exit=$LASTEXITCODE" >> diagwin.txt
           git status --porcelain >> diagwin.txt 2>&1
       - name: Publish diagnostic to ci-diag branch
         continue-on-error: true
@@ -33,5 +33,5 @@ jobs:
           git config user.email "ci-diagnostic@users.noreply.github.com"
           git checkout -b ci-diag
           git add -f diagwin.txt
-          git commit -m "chore: [ci-diag] windows gate output round 2"
+          git commit -m "chore: [ci-diag] windows vitest long-timeout output"
           git push --force origin ci-diag
